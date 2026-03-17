@@ -197,10 +197,8 @@ export async function requestNodeServerWithHost(
  * Returns the path to the built bundle (`entry.js`).
  */
 export async function buildPagesFixture(fixtureDir: string): Promise<string> {
-  const serverOutDir = path.join(
-    await fs.mkdtemp(path.join(os.tmpdir(), "vinext-pages-build-")),
-    "server",
-  );
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-pages-build-"));
+  const serverOutDir = path.join(tmpDir, "server");
 
   // Use disableAppRouter: true so the RSC/App Router pipeline is not activated.
   // This is required when the fixture has both app/ and pages/ directories
@@ -220,6 +218,13 @@ export async function buildPagesFixture(fixtureDir: string): Promise<string> {
     },
   });
 
+  // The SSR bundle externalizes React packages so Node loads them natively.
+  // When the bundle lives in a temp dir, Node can't find them via normal
+  // node_modules traversal. Symlink the project's node_modules into the temp
+  // dir so external imports resolve correctly.
+  const projectNodeModules = path.resolve(import.meta.dirname, "../node_modules");
+  await fs.symlink(projectNodeModules, path.join(tmpDir, "node_modules"));
+
   return path.join(serverOutDir, "entry.js");
 }
 
@@ -228,9 +233,14 @@ export async function buildPagesFixture(fixtureDir: string): Promise<string> {
  * output directory. The fixture source stays in place — only the output lands
  * in a per-call tmpdir so sequential test suites never clobber each other.
  *
- * Returns the path to the built RSC bundle (`<tmp>/server/index.js`).
+ * Returns `{ rscBundlePath, root }` where:
+ * - `rscBundlePath` is the path to the built RSC bundle (`<tmp>/server/index.js`)
+ * - `root` is the fixture directory (contains `vite.config.ts`)
  */
-export async function buildAppFixture(fixtureDir: string): Promise<string> {
+export async function buildAppFixture(fixtureDir: string): Promise<{
+  rscBundlePath: string;
+  root: string;
+}> {
   const outDir = await fs.mkdtemp(path.join(os.tmpdir(), "vinext-app-build-"));
 
   const rscOutDir = path.join(outDir, "server");
@@ -253,7 +263,10 @@ export async function buildAppFixture(fixtureDir: string): Promise<string> {
   const projectNodeModules = path.resolve(import.meta.dirname, "../node_modules");
   await fs.symlink(projectNodeModules, path.join(outDir, "node_modules"));
 
-  return path.join(outDir, "server", "index.js");
+  return {
+    rscBundlePath: path.join(outDir, "server", "index.js"),
+    root: fixtureDir,
+  };
 }
 
 /**
@@ -265,14 +278,13 @@ export async function buildAppFixture(fixtureDir: string): Promise<string> {
  *
  * Both the App Router and Pages Router are served by the same Workers bundle —
  * there is no separate plain-Node SSR bundle for Pages Router. All prerendering
- * for both routers goes through `wrangler unstable_startWorker`.
+ * for both routers goes through the Vite preview server (Miniflare).
  *
- * Returns `{ root, rscBundlePath, wranglerConfigPath }`.
+ * Returns `{ root, rscBundlePath }`.
  */
 export async function buildCloudflareAppFixture(fixtureDir: string): Promise<{
   root: string;
   rscBundlePath: string;
-  wranglerConfigPath: string;
 }> {
   const tmpDir = await createIsolatedFixture(
     fixtureDir,
@@ -302,6 +314,5 @@ export async function buildCloudflareAppFixture(fixtureDir: string): Promise<{
   return {
     root: tmpDir,
     rscBundlePath: path.join(tmpDir, "dist", "server", "index.js"),
-    wranglerConfigPath: path.join(tmpDir, "dist", "server", "wrangler.json"),
   };
 }

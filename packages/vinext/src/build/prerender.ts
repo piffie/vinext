@@ -19,9 +19,6 @@
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
-import { pathToFileURL } from "node:url";
-import type { unstable_startWorker as StartWorker } from "wrangler";
-type WranglerWorker = Awaited<ReturnType<typeof StartWorker>>;
 import type { Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
 import type { ResolvedNextConfig } from "../config/next-config.js";
@@ -29,7 +26,21 @@ import { classifyPagesRoute, classifyAppRoute } from "./report.js";
 import { createValidFileMatcher, type ValidFileMatcher } from "../routing/file-matcher.js";
 import { NoOpCacheHandler, setCacheHandler, getCacheHandler } from "../shims/cache.js";
 import { runWithHeadersContext, headersContextFromRequest } from "../shims/headers.js";
-import { findInNodeModules } from "../utils/project.js";
+
+// ─── Vite preview server handle ───────────────────────────────────────────────
+
+/**
+ * Minimal interface for a running Vite preview server used during CF Workers
+ * prerendering. Wraps `import("vite").PreviewServer` behind a simple
+ * fetch + dispose API so the rest of the prerender pipeline is agnostic to
+ * the underlying server implementation.
+ */
+export interface PreviewServerHandle {
+  /** Dispatch an HTTP request to the preview server. */
+  fetch(url: string, init?: RequestInit): Promise<Response>;
+  /** Shut down the preview server. */
+  dispose(): Promise<void>;
+}
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
 
@@ -118,11 +129,21 @@ export interface PrerenderPagesOptions extends PrerenderOptions {
   /** Pages directory path. */
   pagesDir: string;
   /**
+   * Project root directory.
+   * Required when `_previewServer` is not provided (pages-only builds), so
+   * that a Vite preview server can be started for the project.
+   */
+  root?: string;
+  /**
    * Absolute path to the pre-built Pages Router server bundle
-   * (e.g. `dist/server/entry.js`).
+   * (e.g. `/tmp/abc/server/entry.js`).
    *
-   * Required for plain Node builds. For Cloudflare Workers hybrid builds,
-   * omit this — `runPrerender` passes an internal wrangler instance instead.
+   * When provided, the Vite preview server's `build.outDir` is set to
+   * `path.dirname(path.dirname(pagesBundlePath))` so the `configurePreviewServer`
+   * hook finds the bundle at the correct location. This is useful for tests
+   * that build to a temp directory instead of the project's `dist/`.
+   *
+   * Ignored when `_previewServer` is provided (caller manages the server).
    */
   pagesBundlePath?: string;
 }
@@ -133,46 +154,29 @@ export interface PrerenderAppOptions extends PrerenderOptions {
   /**
    * Absolute path to the pre-built RSC handler bundle (e.g. `dist/server/index.js`).
    *
-   * For plain Node builds, this module is `import()`-ed directly.
-   * For Cloudflare Workers builds, if a `wrangler.json` exists alongside it,
-   * `wrangler unstable_startWorker` is used instead to avoid running Workers-only code
-   * in Node.
+   * The prerender phase fetches all routes via `vite.preview()` — the bundle is
+   * served by whichever platform plugin registered `configurePreviewServer`
+   * (Miniflare for CF Workers, Node HTTP for plain builds).
    */
   rscBundlePath: string;
   /**
-   * Project root directory. Used to locate `wrangler.json` when `rscBundlePath`
-   * is a Cloudflare Workers bundle. Passed through from `runPrerender`.
+   * Project root directory. Used to locate the vite config so
+   * `configurePreviewServer` hooks can set up the correct runtime environment.
    */
   root?: string;
-  /**
-   * Whether this is a Cloudflare Workers build.
-   *
-   * When provided by `runPrerender` (which already detected the build type),
-   * `prerenderApp` skips its own `findInNodeModules` detection — avoiding a
-   * redundant filesystem walk. When omitted, `prerenderApp` detects it itself.
-   */
-  isWorkersBuild?: boolean;
-  /**
-   * Path to the wrangler config file (`wrangler.json` / `wrangler.jsonc`).
-   *
-   * When provided by `runPrerender` (which already located it), `prerenderApp`
-   * uses this directly instead of running its own 4-candidate search.
-   * When omitted, `prerenderApp` searches for it itself.
-   */
-  wranglerConfigPath?: string;
 }
 
 // ─── Internal option extensions ───────────────────────────────────────────────
 // These types are NOT exported. They extend the public option interfaces with
-// an internal `_wranglerDev` field used by `runPrerender` to share a single
-// wrangler instance across both prerender phases in a CF hybrid build.
+// an internal `_previewServer` field used by `runPrerender` to share a single
+// Vite preview server instance across both prerender phases in a CF hybrid build.
 
 type PrerenderPagesOptionsInternal = PrerenderPagesOptions & {
-  _wranglerDev?: WranglerWorker;
+  _previewServer?: PreviewServerHandle;
 };
 
 type PrerenderAppOptionsInternal = PrerenderAppOptions & {
-  _wranglerDev?: WranglerWorker;
+  _previewServer?: PreviewServerHandle;
 };
 
 // ─── Concurrency helpers ──────────────────────────────────────────────────────
@@ -339,79 +343,191 @@ async function resolveParentParams(
   return currentParams;
 }
 
-// ─── Wrangler config locator ──────────────────────────────────────────────────
+// ─── Vite preview server starter ─────────────────────────────────────────────
 
 /**
- * Find the `wrangler.json` / `wrangler.jsonc` config file for a build.
+ * Start a Vite production preview server for prerendering.
  *
- * Checks two locations in order of preference:
- *   1. `serverDir/wrangler.json[c]`  — generated by @cloudflare/vite-plugin
- *      inside `dist/server/` (includes assets.directory for wrangler 4+).
- *   2. `projectRoot/wrangler.json[c]` — project root fallback for non-standard
- *      setups where the user manages their own wrangler config.
+ * Works for **both** Cloudflare Workers builds and plain Node builds:
  *
- * Returns the first path that exists, or `undefined` if none is found.
+ * **CF Workers builds** (`@cloudflare/vite-plugin` detected in node_modules):
+ *   `@cloudflare/vite-plugin` hooks into Vite's `configurePreviewServer` to
+ *   spin up a Miniflare-backed server that serves the built worker bundle.
+ *   A random UUID secret is written to `dist/server/.dev.vars` before
+ *   `preview()` is called; the plugin reads that file and injects
+ *   `VINEXT_PRERENDER_SECRET` as a Miniflare binding. The file is deleted
+ *   in `dispose()`.
+ *
+ * **Plain Node builds**:
+ *   The vinext `configurePreviewServer` hook in `index.ts` loads the built
+ *   production bundle and wires it up as a catch-all middleware — so
+ *   `vite.preview()` serves full SSR responses, not just static files.
+ *   The secret is set in `process.env.VINEXT_PRERENDER_SECRET` (visible to
+ *   the in-process bundle) and deleted in `dispose()`.
+ *
+ * In both cases the returned handle injects `x-vinext-prerender: <secret>`
+ * on every request so `/__vinext/prerender/*` endpoints can authenticate the
+ * caller, and `__ensureInstrumentation()` skips `register()` during prerender.
+ *
+ * The server listens on a random available port (port 0).
+ *
+ * Returns a {@link PreviewServerHandle} with `fetch` and `dispose` methods.
  */
-export function findWranglerConfig(serverDir: string, projectRoot: string): string | undefined {
-  return [
-    path.join(serverDir, "wrangler.json"),
-    path.join(serverDir, "wrangler.jsonc"),
-    path.join(projectRoot, "wrangler.json"),
-    path.join(projectRoot, "wrangler.jsonc"),
-  ].find((p) => fs.existsSync(p));
-}
+export async function startVitePreviewServer(
+  projectRoot: string,
+  options?: {
+    /**
+     * Override the `build.outDir` passed to `vite.preview()`.
+     *
+     * The `configurePreviewServer` hook resolves bundle paths relative to
+     * `<root>/<build.outDir>/server/`. Pass this when the build output lives
+     * in a non-standard location (e.g. a temp dir used by tests).
+     * Defaults to `dist` (the Vite default), which resolves to `<root>/dist/`.
+     */
+    buildOutDir?: string;
+  },
+): Promise<PreviewServerHandle> {
+  const { preview } = await import("vite");
+  const { randomUUID } = await import("node:crypto");
 
-// ─── Wrangler loader ─────────────────────────────────────────────────────────
+  // Generate a one-time secret for this prerender session.
+  const secret = randomUUID();
 
-/**
- * Resolve and import the `wrangler` package from the project's own
- * `node_modules`. wrangler is an optional peer dependency — only installed in
- * Cloudflare Workers projects.
- *
- * Tries two well-known internal entry points in order:
- *   1. `wrangler-dist/cli.js`  — wrangler 3.x / 4.x bundled CLI entry
- *   2. `index.js`              — fallback for alternative wrangler versions
- *
- * Throws a user-friendly error if wrangler is not installed.
- */
-export async function loadWrangler(projectRoot: string): Promise<typeof import("wrangler")> {
-  const candidates = [
-    path.resolve(projectRoot, "node_modules/wrangler/wrangler-dist/cli.js"),
-    path.resolve(projectRoot, "node_modules/wrangler/index.js"),
+  // Locate the project's vite config file.
+  const configCandidates = [
+    path.join(projectRoot, "vite.config.ts"),
+    path.join(projectRoot, "vite.config.js"),
+    path.join(projectRoot, "vite.config.mts"),
+    path.join(projectRoot, "vite.config.mjs"),
   ];
+  const configFile = configCandidates.find((p) => fs.existsSync(p));
 
-  const wranglerEntry = candidates.find((p) => fs.existsSync(p));
-  if (!wranglerEntry) {
-    throw new Error(
-      `Prerendering a Cloudflare Workers build requires 'wrangler' to be installed in your project.\n` +
-        `Run: npm install --save-dev wrangler`,
-    );
-  }
+  // Inject the prerender secret unconditionally via both channels so that
+  // /__vinext/prerender/* endpoints can authenticate the caller regardless of
+  // the deployment target:
+  //
+  //   process.env  — read directly by Node builds (RSC bundle runs in same
+  //                  process as the preview server).
+  //   .dev.vars    — read by @cloudflare/vite-plugin / Miniflare which injects
+  //                  it as the VINEXT_PRERENDER_SECRET env binding inside the
+  //                  V8 isolate. process.env does not cross the isolate boundary
+  //                  so this file is required for CF Workers builds.
+  //
+  // Writing both is harmless: a Node build ignores .dev.vars; a CF build ignores
+  // the host process.env. Using both removes any need to detect the build target.
+  const buildOutDir = options?.buildOutDir;
+  const serverDir = path.join(buildOutDir ?? path.join(projectRoot, "dist"), "server");
+  const devVarsPath = path.join(serverDir, ".dev.vars");
+  fs.mkdirSync(serverDir, { recursive: true });
+  fs.writeFileSync(devVarsPath, `VINEXT_PRERENDER_SECRET = "${secret}"\n`, "utf-8");
 
-  return (await import(wranglerEntry as string)) as typeof import("wrangler");
-}
+  const prevNodeSecret = process.env.VINEXT_PRERENDER_SECRET;
+  process.env.VINEXT_PRERENDER_SECRET = secret;
 
-// ─── Bundle loading ───────────────────────────────────────────────────────────
+  // Always load the project's vite.config.ts so environment-affecting plugins
+  // (e.g. @cloudflare/vite-plugin, Nitro adapters, custom platform plugins) can
+  // register their own configurePreviewServer hooks that set up the correct
+  // runtime environment for prerendering.
+  //
+  // When buildOutDir is a non-default temp dir we need two extra adjustments:
+  //
+  // 1. Environment outDir override — @vitejs/plugin-rsc's configurePreviewServer
+  //    reads environments.rsc.build.outDir (resolved in its configResolved hook)
+  //    to find the RSC bundle. With a temp buildOutDir, that path points to the
+  //    fixture's default dist/ instead of the temp dir. We inject an
+  //    enforce:"post" plugin whose config() hook runs AFTER vinext's config() hook
+  //    to stamp the correct absolute temp-dir paths onto all three environments.
+  //
+  // 2. RSC bundle guard — for Pages-only builds (no RSC bundle in buildOutDir),
+  //    the RSC plugin's configurePreviewServer would crash with "Cannot find
+  //    module …/server/index.js". We patch its hook away in configResolved by
+  //    replacing it with a safe no-op. Vinext's own configurePreviewServer
+  //    (index.ts) handles Pages Router serving correctly in both cases.
+  //
+  // Directory layout created by buildAppFixture / buildApp:
+  //   <buildOutDir>/server/        ← rsc environment (RSC bundle: index.js)
+  //   <buildOutDir>/server/ssr/    ← ssr environment
+  //   <buildOutDir>/client/        ← client environment
 
-/**
- * Load a pre-built production bundle via a cache-busted dynamic import.
- *
- * Appends the bundle's mtime as a query parameter so that if the bundle is
- * rebuilt (e.g. by a previous test in the same process), Node's ESM cache
- * does not return the stale module.  Same mtime = same content = cache hit
- * (no-op).  New mtime = fresh import.
- *
- * Throws a user-friendly error if the bundle does not exist.
- */
-async function loadBundle(bundlePath: string): Promise<Record<string, unknown>> {
-  if (!fs.existsSync(bundlePath)) {
-    throw new Error(
-      `[vinext] Bundle not found at ${bundlePath}.\nRun \`vinext build\` before prerendering.`,
-    );
-  }
+  const extraPlugins = buildOutDir
+    ? [
+        // (1) Stamp correct outDirs so the RSC plugin finds the temp bundle.
+        {
+          name: "vinext:preview-outdir-override",
+          enforce: "post" as const,
+          config() {
+            return {
+              environments: {
+                rsc: { build: { outDir: path.join(buildOutDir, "server") } },
+                ssr: { build: { outDir: path.join(buildOutDir, "server", "ssr") } },
+                client: { build: { outDir: path.join(buildOutDir, "client") } },
+              },
+            };
+          },
+        },
+        // (2) Guard against RSC plugin crash when the RSC bundle is absent
+        //     (Pages-only build). After configResolved has run (all outDirs
+        //     are resolved), walk the plugin list and replace the RSC plugin's
+        //     configurePreviewServer with a no-op if the bundle file is missing.
+        {
+          name: "vinext:rsc-preview-guard",
+          enforce: "post" as const,
+          configResolved(config: import("vite").ResolvedConfig) {
+            const rscOutDir: string =
+              (config.environments as Record<string, { build?: { outDir?: string } }>)?.rsc?.build
+                ?.outDir ?? path.join(buildOutDir, "server");
+            const rscBundle = path.join(rscOutDir, "index.js");
+            if (fs.existsSync(rscBundle)) return; // RSC bundle present — nothing to do
 
-  const mtime = fs.statSync(bundlePath).mtimeMs;
-  return (await import(`${pathToFileURL(bundlePath).href}?t=${mtime}`)) as Record<string, unknown>;
+            // RSC bundle absent: neutralise the RSC plugin's configurePreviewServer
+            // so it doesn't throw "Cannot find module …/index.js".
+            for (const p of config.plugins as import("vite").Plugin[]) {
+              if (p.name === "rsc" && p.configurePreviewServer) {
+                p.configurePreviewServer = undefined;
+              }
+            }
+          },
+        },
+      ]
+    : [];
+
+  const server = await preview({
+    root: projectRoot,
+    configFile,
+    logLevel: "silent",
+    plugins: extraPlugins,
+    preview: { port: 0, strictPort: false },
+    ...(buildOutDir ? { build: { outDir: buildOutDir } } : {}),
+  });
+
+  // Resolve the actual listening port from the server's address.
+  const addr = server.httpServer.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+
+  return {
+    fetch(url: string, init?: RequestInit): Promise<Response> {
+      const urlObj = new URL(url);
+      urlObj.host = `localhost:${port}`;
+      // Inject the prerender secret on every request so the worker's
+      // /__vinext/prerender/* endpoints can authenticate the caller.
+      const headers = new Headers((init?.headers as HeadersInit | undefined) ?? {});
+      headers.set("x-vinext-prerender", secret);
+      return fetch(urlObj.toString(), { ...init, headers });
+    },
+    async dispose(): Promise<void> {
+      await server.close();
+      // Remove the .dev.vars file so the secret doesn't persist after prerender.
+      fs.rmSync(devVarsPath, { force: true });
+      // Restore process.env.VINEXT_PRERENDER_SECRET to whatever it was before
+      // (typically undefined). This matters when multiple prerender sessions run
+      // in the same process (e.g. test suites).
+      if (prevNodeSecret === undefined) {
+        delete process.env.VINEXT_PRERENDER_SECRET;
+      } else {
+        process.env.VINEXT_PRERENDER_SECRET = prevNodeSecret;
+      }
+    },
+  };
 }
 
 // ─── Pages Router Prerender ───────────────────────────────────────────────────
@@ -443,8 +559,6 @@ export async function prerenderPages({
   mode,
   ...options
 }: PrerenderPagesOptionsInternal): Promise<PrerenderResult> {
-  const pagesBundlePath = options.pagesBundlePath;
-  const wranglerDev = options._wranglerDev;
   const manifestDir = options.manifestDir ?? outDir;
   const concurrency = options.concurrency ?? DEFAULT_CONCURRENCY;
   const onProgress = options.onProgress;
@@ -452,10 +566,27 @@ export async function prerenderPages({
   const fileMatcher = createValidFileMatcher(config.pageExtensions);
   const results: PrerenderRouteResult[] = [];
 
-  if (!pagesBundlePath && !wranglerDev) {
-    throw new Error(
-      "[vinext] prerenderPages: either pagesBundlePath or wranglerDev must be provided.",
+  // previewServer is either passed in (shared, from runPrerender for hybrid builds)
+  // or we start our own for pages-only Node builds.
+  let previewServer = options._previewServer;
+  let ownedPagesServer: PreviewServerHandle | null = null;
+
+  if (!previewServer) {
+    // pages-only build: start our own Vite preview server.
+    // The vinext configurePreviewServer hook (index.ts) wires up the built
+    // Pages Router bundle for Node builds; @cloudflare/vite-plugin does the
+    // same for CF Workers builds — so vite.preview() works for both.
+    const root = options.root ?? path.dirname(pagesDir);
+    // When pagesBundlePath points to a temp dir (e.g. in tests), derive
+    // buildOutDir so the configurePreviewServer hook finds the bundle there.
+    const buildOutDir = options.pagesBundlePath
+      ? path.dirname(path.dirname(options.pagesBundlePath))
+      : undefined;
+    ownedPagesServer = await startVitePreviewServer(
+      root,
+      buildOutDir ? { buildOutDir } : undefined,
     );
+    previewServer = ownedPagesServer;
   }
 
   fs.mkdirSync(outDir, { recursive: true });
@@ -467,21 +598,8 @@ export async function prerenderPages({
 
   const previousHandler = getCacheHandler();
   setCacheHandler(new NoOpCacheHandler());
-  // VINEXT_PRERENDER tells the Node-side bundle to skip instrumentation.register()
-  // during prerender. For Cloudflare Workers builds the flag is injected into the
-  // worker via wrangler vars instead, so this only affects Node builds.
-  //
-  // process.env mutation is intentional: the RSC bundle (imported via loadBundle)
-  // runs in the same Node process and reads this flag at call time. The set/delete
-  // is wrapped in try/finally so it is always restored, making rerenderPages() safe
-  // to call sequentially (the normal case). Parallel calls within one process are
-  // not a supported use case.
-  process.env.VINEXT_PRERENDER = "1";
   try {
     // ── Determine renderPage and bundlePageRoutes ─────────────────────────
-    // For wrangler-based (CF) builds: renderPage fetches via the worker;
-    // getStaticPaths is fetched from a dedicated prerender endpoint.
-    // For plain Node builds: everything comes from the imported bundle.
 
     type BundleRoute = {
       pattern: string;
@@ -501,59 +619,38 @@ export async function prerenderPages({
     let renderPage: (urlPath: string) => Promise<Response>;
     let bundlePageRoutes: BundleRoute[];
 
-    if (wranglerDev) {
-      // CF Workers build: render by fetching through the running worker.
-      // worker.fetch() only accepts URL strings (not Request objects).
-      renderPage = (urlPath: string) =>
-        wranglerDev.fetch(`http://localhost${urlPath}`) as unknown as Promise<Response>;
+    // previewServer is always provided — either a Vite preview server for CF Workers
+    // builds (started by runPrerender) or a plain Node http server wrapping the
+    // Pages Router bundle (startNodePagesServer, also started by runPrerender).
+    // CF Workers build: render by fetching through the running preview server.
+    renderPage = (urlPath: string) => previewServer!.fetch(`http://localhost${urlPath}`);
 
-      // Build the bundlePageRoutes list from static file analysis + route info.
-      // getStaticPaths is fetched from the worker via a prerender endpoint.
-      bundlePageRoutes = routes.map((r) => ({
-        pattern: r.pattern,
-        isDynamic: r.isDynamic ?? false,
-        params: {},
-        filePath: r.filePath,
-        module: {
-          getStaticPaths: r.isDynamic
-            ? async ({ locales, defaultLocale }: { locales: string[]; defaultLocale: string }) => {
-                const search = new URLSearchParams({ pattern: r.pattern });
-                if (locales.length > 0) search.set("locales", JSON.stringify(locales));
-                if (defaultLocale) search.set("defaultLocale", defaultLocale);
-                const res = (await wranglerDev.fetch(
-                  `http://localhost/__vinext/prerender/pages-static-paths?${search}`,
-                )) as unknown as Response;
-                const text = await res.text();
-                if (!res.ok || text === "null") return { paths: [], fallback: false };
-                return JSON.parse(text) as {
-                  paths: Array<{ params: Record<string, string | string[]> }>;
-                  fallback: unknown;
-                };
-              }
-            : undefined,
-        },
-      }));
-    } else {
-      const bundleExports = await loadBundle(pagesBundlePath!);
-
-      if (
-        typeof bundleExports.renderPage !== "function" ||
-        !Array.isArray(bundleExports.pageRoutes)
-      ) {
-        throw new Error(
-          `[vinext] Pages Router bundle at ${pagesBundlePath} is missing required exports (renderPage, pageRoutes).\nRun \`vinext build\` to regenerate the bundle.`,
-        );
-      }
-
-      const _renderPage = bundleExports.renderPage as (
-        request: Request,
-        url: string,
-        manifest: Record<string, string[]>,
-      ) => Promise<Response>;
-      renderPage = (urlPath: string) =>
-        _renderPage(new Request(`http://localhost${urlPath}`), urlPath, {});
-      bundlePageRoutes = bundleExports.pageRoutes as BundleRoute[];
-    }
+    // Build the bundlePageRoutes list from static file analysis + route info.
+    // getStaticPaths is fetched from the preview server via a prerender endpoint.
+    bundlePageRoutes = routes.map((r) => ({
+      pattern: r.pattern,
+      isDynamic: r.isDynamic ?? false,
+      params: {},
+      filePath: r.filePath,
+      module: {
+        getStaticPaths: r.isDynamic
+          ? async ({ locales, defaultLocale }: { locales: string[]; defaultLocale: string }) => {
+              const search = new URLSearchParams({ pattern: r.pattern });
+              if (locales.length > 0) search.set("locales", JSON.stringify(locales));
+              if (defaultLocale) search.set("defaultLocale", defaultLocale);
+              const res = await previewServer!.fetch(
+                `http://localhost/__vinext/prerender/pages-static-paths?${search}`,
+              );
+              const text = await res.text();
+              if (!res.ok || text === "null") return { paths: [], fallback: false };
+              return JSON.parse(text) as {
+                paths: Array<{ params: Record<string, string | string[]> }>;
+                fallback: unknown;
+              };
+            }
+          : undefined,
+      },
+    }));
 
     // ── Gather pages to render ──────────────────────────────────────────────
     type PageToRender = {
@@ -569,29 +666,14 @@ export async function prerenderPages({
       const routeName = path.basename(route.filePath, path.extname(route.filePath));
       if (routeName.startsWith("_")) continue;
 
-      // For plain Node builds, cross-reference with file-system route scan.
-      // For CF builds, bundlePageRoutes is already built from file-system routes.
-      if (!wranglerDev) {
-        const fsRoute = routes.find(
-          (r) => r.filePath === route.filePath || r.pattern === route.pattern,
-        );
-        if (!fsRoute) continue;
-      }
+      // bundlePageRoutes is always built from file-system routes (see above),
+      // so no cross-reference check needed here.
 
       const { type, revalidate: classifiedRevalidate } = classifyPagesRoute(route.filePath);
 
-      // For Node builds (not CF Workers), the bundle module is available at
-      // runtime — use its actual exports to determine page type more accurately
-      // than static file analysis. CF builds don't have direct module access, so
-      // they fall back to classifyPagesRoute() for type detection.
-      const runtimeType: "ssr" | "ssg" | "static" | undefined = !wranglerDev
-        ? typeof route.module.getServerSideProps === "function"
-          ? "ssr"
-          : typeof route.module.getStaticProps === "function"
-            ? "ssg"
-            : undefined
-        : undefined;
-      const effectiveType = runtimeType ?? type;
+      // Route classification is always via static file analysis — route.module
+      // only carries getStaticPaths (fetched via the prerender endpoint).
+      const effectiveType = type;
 
       if (effectiveType === "ssr") {
         if (mode === "export") {
@@ -737,7 +819,6 @@ export async function prerenderPages({
     return { routes: results };
   } finally {
     setCacheHandler(previousHandler);
-    delete process.env.VINEXT_PRERENDER;
   }
 }
 
@@ -775,16 +856,6 @@ export async function prerenderApp({
 
   const previousHandler = getCacheHandler();
   setCacheHandler(new NoOpCacheHandler());
-  // VINEXT_PRERENDER tells the Node-side bundle to skip instrumentation.register()
-  // during prerender. For Cloudflare Workers builds the flag is injected into the
-  // worker via wrangler vars instead, so this only affects Node builds.
-  //
-  // process.env mutation is intentional: the RSC bundle (imported via loadBundle)
-  // runs in the same Node process and reads this flag at call time. The set/delete
-  // is wrapped in try/finally so it is always restored, making prerenderApp() safe
-  // to call sequentially (the normal case). Parallel calls within one process are
-  // not a supported use case.
-  process.env.VINEXT_PRERENDER = "1";
 
   // Detect Cloudflare Workers build by checking whether @cloudflare/vite-plugin
   // is installed in the project's node_modules — the same signal used by the
@@ -792,27 +863,28 @@ export async function prerenderApp({
   // wrangler.json because that file lives in the project root, not next to the
   // built bundle.
   //
-  // When the caller (runPrerender) already detected the build type and located
-  // the wrangler config, we use those values directly to avoid redundant
-  // filesystem walks.
+  // When the caller (runPrerender) already detected the build type we use that
+  // value directly to avoid redundant filesystem walks.
   const serverDir = path.dirname(rscBundlePath);
-  const projectRoot = options.root ?? path.dirname(path.dirname(serverDir));
-  const isWorkersBuild =
-    options.isWorkersBuild ?? findInNodeModules(projectRoot, "@cloudflare/vite-plugin") !== null;
-  // Locate the generated wrangler.json for the unstable_startWorker config option.
-  // The @cloudflare/vite-plugin generates dist/server/wrangler.json during
-  // the build — it includes assets.directory pointing to dist/client, which
-  // is required by wrangler 4+. Fall back to the project root wrangler.jsonc
-  // as a convenience for non-standard setups.
-  const wranglerConfigPath =
-    options.wranglerConfigPath ?? findWranglerConfig(serverDir, projectRoot);
+  // Separate the "vite config root" (fixture dir with vite.config.ts) from the
+  // "build output dir" (which may be a temp dir used by tests).
+  // `options.root` is the fixture dir; if not provided, we fall back to
+  // deriving it from rscBundlePath (works when build is in-place at dist/).
+  const derivedRoot = path.dirname(path.dirname(serverDir));
+  const projectRoot = options.root ?? derivedRoot;
+  // If rscBundlePath is NOT inside `<projectRoot>/dist/server/`, pass an
+  // explicit buildOutDir so the configurePreviewServer hook can find the
+  // bundle in the temp dir rather than looking under <projectRoot>/dist/.
+  const expectedServerDir = path.join(projectRoot, "dist", "server");
+  const buildOutDir =
+    path.normalize(serverDir) !== path.normalize(expectedServerDir)
+      ? path.dirname(serverDir) // parent of server/ dir (the outDir)
+      : undefined;
 
-  // For Workers builds we spin up wrangler unstable_startWorker and proxy all requests
-  // through it. For plain Node builds we import the bundle directly.
-  //
-  // rscHandler accepts a Request object. For Workers builds, worker.fetch() only
-  // accepts a URL string (not a Request object), so the wrapper extracts req.url
-  // and forwards headers via RequestInit.
+  // Always use a Vite preview server — the correct platform runtime is provided
+  // by whichever configurePreviewServer hooks are registered in vite.config.ts
+  // (e.g. @cloudflare/vite-plugin for Miniflare, @vitejs/plugin-rsc for Node,
+  // or vinext's own hook for Pages-only builds). No platform detection needed.
   let rscHandler: (request: Request) => Promise<Response>;
   let staticParamsMap: Record<
     string,
@@ -822,43 +894,34 @@ export async function prerenderApp({
     | null
     | undefined
   > = {};
-  // ownedWranglerDev: a worker instance we started ourselves and must dispose in finally.
-  // When the caller passes options.wranglerDev we use that and do NOT dispose it.
-  let ownedWranglerDev: WranglerWorker | null = null;
+  // ownedPreviewServer: a server we started ourselves and must dispose in finally.
+  // When the caller passes _previewServer we use that and do NOT dispose it.
+  let ownedPreviewServer: PreviewServerHandle | null = null;
 
   try {
-    if (isWorkersBuild) {
-      // Use caller-provided wranglerDev if available; otherwise start our own.
-      const devWorker: WranglerWorker = options._wranglerDev
-        ? options._wranglerDev
+    {
+      // Use caller-provided preview server if available; otherwise start our own.
+      const server: PreviewServerHandle = options._previewServer
+        ? options._previewServer
         : await (async () => {
-            // wrangler is an optional peer dep — only required for Cloudflare Workers builds.
-            // Resolve it from the project root so we load the copy installed there.
-            const wrangler = await loadWrangler(
-              options.root ?? path.dirname(path.dirname(serverDir)),
+            const handle = await startVitePreviewServer(
+              projectRoot,
+              buildOutDir ? { buildOutDir } : undefined,
             );
-            const worker = await wrangler.unstable_startWorker({
-              entrypoint: rscBundlePath,
-              config: wranglerConfigPath,
-              bindings: { VINEXT_PRERENDER: { type: "plain_text", value: "1" } },
-              dev: { logLevel: "none" },
-            });
-            ownedWranglerDev = worker;
-            return worker;
+            ownedPreviewServer = handle;
+            return handle;
           })();
 
-      // worker.fetch() does NOT accept a Request object — only (url: string, init?: RequestInit).
-      // Extract the URL string and headers from the Request before calling.
-      // wrangler's fetch returns undici's Response; cast via unknown to global Response.
+      // rscHandler proxies requests through the preview server.
       rscHandler = (req: Request) => {
         const headersObj: Record<string, string> = {};
         req.headers.forEach((value, key) => {
           headersObj[key] = value;
         });
-        return devWorker.fetch(req.url, {
+        return server.fetch(req.url, {
           method: req.method,
           headers: headersObj,
-        }) as unknown as Promise<Response>;
+        });
       };
 
       // staticParamsMap: resolved lazily via the HTTP endpoint.
@@ -892,10 +955,9 @@ export async function prerenderApp({
               if (Object.keys(params).length > 0) {
                 search.set("parentParams", JSON.stringify(params));
               }
-              // worker.fetch() requires a URL string, not a Request object
-              const res = (await devWorker.fetch(
+              const res = await server.fetch(
                 `http://localhost/__vinext/prerender/static-params?${search}`,
-              )) as unknown as Response;
+              );
               const text = await res.text();
               if (text === "null") return null;
               return JSON.parse(text) as Record<string, string | string[]>[];
@@ -908,13 +970,6 @@ export async function prerenderApp({
           return false;
         },
       });
-    } else {
-      const rscEntry = await loadBundle(rscBundlePath);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      rscHandler = rscEntry.default as (request: Request, ctx?: unknown) => Promise<Response>;
-      if (rscEntry.generateStaticParamsMap) {
-        staticParamsMap = rscEntry.generateStaticParamsMap as typeof staticParamsMap;
-      }
     }
 
     // ── Collect URLs to render ────────────────────────────────────────────────
@@ -1223,10 +1278,8 @@ export async function prerenderApp({
     return { routes: results };
   } finally {
     setCacheHandler(previousHandler);
-    delete process.env.VINEXT_PRERENDER;
-    const devToStop = ownedWranglerDev as WranglerWorker | null;
-    if (devToStop) {
-      await devToStop.dispose().catch(() => {});
+    if (ownedPreviewServer) {
+      await (ownedPreviewServer as PreviewServerHandle).dispose().catch(() => {});
     }
   }
 }

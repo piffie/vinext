@@ -1908,10 +1908,11 @@ describe("App Router dev server malformed URL handling", () => {
 
 describe("App Router Static export", () => {
   let rscBundlePath: string;
+  let appFixtureRoot: string;
   const exportDir = path.resolve(APP_FIXTURE_DIR, "out");
 
   beforeAll(async () => {
-    rscBundlePath = await buildAppFixture(APP_FIXTURE_DIR);
+    ({ rscBundlePath, root: appFixtureRoot } = await buildAppFixture(APP_FIXTURE_DIR));
   }, 120_000);
 
   afterAll(() => {
@@ -1930,6 +1931,7 @@ describe("App Router Static export", () => {
     const result = await staticExportApp({
       routes,
       rscBundlePath,
+      root: appFixtureRoot,
       outDir: exportDir,
       config,
     });
@@ -1998,6 +2000,7 @@ describe("App Router Static export", () => {
       const result = await staticExportApp({
         routes: fakeRoutes,
         rscBundlePath,
+        root: appFixtureRoot,
         outDir: tempDir,
         config,
       });
@@ -2043,6 +2046,7 @@ describe("App Router Static export", () => {
       const result = await staticExportApp({
         routes: fakeRoutes,
         rscBundlePath,
+        root: appFixtureRoot,
         outDir: tempDir,
         config,
       });

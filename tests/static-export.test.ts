@@ -186,7 +186,7 @@ describe("Static export — App Router (served via HTTP)", () => {
 
   beforeAll(async () => {
     // 1. Build the fixture and run static export
-    const rscBundlePath = await buildAppFixture(APP_FIXTURE);
+    const { rscBundlePath, root } = await buildAppFixture(APP_FIXTURE);
 
     const { staticExportApp } = await import("../packages/vinext/src/build/static-export.js");
     const { appRouter } = await import("../packages/vinext/src/routing/app-router.js");
@@ -198,6 +198,7 @@ describe("Static export — App Router (served via HTTP)", () => {
 
     await staticExportApp({
       rscBundlePath,
+      root,
       routes,
       outDir: exportDir,
       config,

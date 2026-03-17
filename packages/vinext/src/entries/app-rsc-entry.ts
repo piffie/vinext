@@ -90,9 +90,9 @@ export interface AppRouterConfig {
   /**
    * When true, the project has a `pages/` directory alongside the App Router.
    * The generated RSC entry exposes `/__vinext/prerender/pages-static-paths`
-   * so `prerenderPages` can call `getStaticPaths` via `wrangler unstable_startWorker`
-   * in CF Workers builds. `pageRoutes` is loaded from the SSR environment via
-   * `import("./ssr/index.js")`, which re-exports it from
+   * so `prerenderPages` can call `getStaticPaths` via the Vite preview server
+   * (Miniflare) in CF Workers builds. `pageRoutes` is loaded from the SSR
+   * environment via `import("./ssr/index.js")`, which re-exports it from
    * `virtual:vinext-server-entry` when this flag is set.
    */
   hasPagesDir?: boolean;
@@ -641,7 +641,6 @@ ${
 let __instrumentationInitialized = false;
 let __instrumentationInitPromise = null;
 async function __ensureInstrumentation() {
-  if (process.env.VINEXT_PRERENDER === "1") return;
   if (__instrumentationInitialized) return;
   if (__instrumentationInitPromise) return __instrumentationInitPromise;
   __instrumentationInitPromise = (async () => {
@@ -1565,14 +1564,15 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
   // ── Prerender: static-params endpoint ────────────────────────────────
   // Internal endpoint used by prerenderApp() during build to fetch
-  // generateStaticParams results via wrangler unstable_startWorker.
-  // Gated on VINEXT_PRERENDER=1 to prevent exposure in normal deployments.
-  // For Node builds, process.env.VINEXT_PRERENDER is set directly by the
-  // prerender orchestrator. For CF Workers builds, wrangler unstable_startWorker
-  // injects VINEXT_PRERENDER as a binding which Miniflare exposes via process.env
-  // in bundled workers. The /__vinext/ prefix ensures no user route ever conflicts.
+  // generateStaticParams results via the Vite preview server (Miniflare).
+  // Gated on the x-vinext-prerender secret header to prevent exposure in
+  // normal deployments. The secret is a per-build UUID written to
+  // dist/server/.dev.vars by startVitePreviewServer() before preview() starts;
+  // @cloudflare/vite-plugin reads it and injects it as the VINEXT_PRERENDER_SECRET
+  // binding. The /__vinext/ prefix ensures no user route ever conflicts.
   if (pathname === "/__vinext/prerender/static-params") {
-    if (process.env.VINEXT_PRERENDER !== "1") {
+    const __prerenderSecret = request.headers.get("x-vinext-prerender");
+    if (!__prerenderSecret || __prerenderSecret !== process.env.VINEXT_PRERENDER_SECRET) {
       return new Response("Not Found", { status: 404 });
     }
     const pattern = url.searchParams.get("pattern");
@@ -1598,10 +1598,9 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       ? `
   // ── Prerender: pages-static-paths endpoint ───────────────────────────
   // Internal endpoint used by prerenderPages() during a CF Workers hybrid
-  // build to call getStaticPaths() for dynamic Pages Router routes via
-  // wrangler unstable_startWorker. Returns JSON-serialised getStaticPaths result.
-  // Gated on VINEXT_PRERENDER=1 to prevent exposure in normal deployments.
-  // See static-params endpoint above for process.env vs CF vars notes.
+  // build to call getStaticPaths() for dynamic Pages Router routes via the
+  // Vite preview server (Miniflare). Returns JSON-serialised getStaticPaths result.
+  // Gated on the x-vinext-prerender secret header (same mechanism as above).
   //
   // pageRoutes lives in the SSR environment (virtual:vinext-server-entry).
   // We load it lazily via import.meta.viteRsc.loadModule — the same pattern
@@ -1609,7 +1608,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // plugin transforms this call into a bundled cross-environment import, so it
   // works correctly in the CF Workers production bundle running in Miniflare.
   if (pathname === "/__vinext/prerender/pages-static-paths") {
-    if (process.env.VINEXT_PRERENDER !== "1") {
+    const __prerenderSecret2 = request.headers.get("x-vinext-prerender");
+    if (!__prerenderSecret2 || __prerenderSecret2 !== process.env.VINEXT_PRERENDER_SECRET) {
       return new Response("Not Found", { status: 404 });
     }
     const __gspPattern = url.searchParams.get("pattern");

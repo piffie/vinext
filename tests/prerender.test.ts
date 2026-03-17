@@ -266,7 +266,7 @@ describe("prerenderApp — default mode (app-basic)", () => {
   let results: PrerenderRouteResult[];
 
   beforeAll(async () => {
-    const rscBundlePath = await buildAppFixture(APP_FIXTURE);
+    const { rscBundlePath, root } = await buildAppFixture(APP_FIXTURE);
     outDir = tmpDir("vinext-prerender-app-");
 
     const { prerenderApp } = await import("../packages/vinext/src/build/prerender.js");
@@ -280,6 +280,7 @@ describe("prerenderApp — default mode (app-basic)", () => {
     const prerenderResult = await prerenderApp({
       mode: "default",
       rscBundlePath,
+      root,
       routes,
       outDir,
       config,
@@ -598,16 +599,17 @@ describe("runPrerender — output: 'export' wiring", () => {
 //
 // Verifies that prerenderApp() works correctly when the production bundle is a
 // Cloudflare Workers bundle (dist/server/index.js is the worker entry, not a
-// Node-runnable RSC handler). The fix uses wrangler unstable_startWorker to spin up a
-// local miniflare instance and routes all render + static-params requests
-// through it instead of importing the bundle directly in Node.
+// Node-runnable RSC handler). The fix uses a Vite preview server (backed by
+// Miniflare via @cloudflare/vite-plugin) to spin up a local instance and routes
+// all render + static-params requests through it instead of importing the bundle
+// directly in Node.
 
 // ─── Cloudflare Workers hybrid build (app/ + pages/) ─────────────────────────
 //
 // Verifies that both prerenderApp() and prerenderPages() work correctly when
-// the build is a Cloudflare Workers bundle. prerenderApp() must use wrangler
-// unstable_startWorker (the worker bundle cannot be imported in Node); prerenderPages()
-// loads dist/server/entry.js directly as usual.
+// the build is a Cloudflare Workers bundle. prerenderApp() must use the Vite
+// preview server (the worker bundle cannot be imported in Node); prerenderPages()
+// also routes through the preview server since the same worker serves both routers.
 
 describe("Cloudflare Workers hybrid build (cf-app-basic)", () => {
   let outDir: string;
@@ -625,7 +627,7 @@ describe("Cloudflare Workers hybrid build (cf-app-basic)", () => {
 
   // ── App Router ──────────────────────────────────────────────────────────────
 
-  describe("prerenderApp — app router via wrangler unstable_startWorker", () => {
+  describe("prerenderApp — app router via Vite preview server (Miniflare)", () => {
     it("renders / speculatively", () => {
       const r = findRoute(allResults, "/");
       expect(r).toMatchObject({ route: "/", status: "rendered", revalidate: false });
@@ -677,7 +679,7 @@ describe("Cloudflare Workers hybrid build (cf-app-basic)", () => {
 
   // ── Pages Router ────────────────────────────────────────────────────────────
 
-  describe("prerenderPages — pages router via wrangler unstable_startWorker", () => {
+  describe("prerenderPages — pages router via Vite preview server (Miniflare)", () => {
     it("renders static index page", () => {
       const r = findRoute(allResults, "/");
       expect(r).toMatchObject({ route: "/", status: "rendered", revalidate: false });

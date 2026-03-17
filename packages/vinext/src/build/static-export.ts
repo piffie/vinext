@@ -24,10 +24,24 @@ import { prerenderPages, prerenderApp, type PrerenderRouteResult } from "./prere
 
 export interface StaticExportOptions {
   /**
-   * Absolute path to the pre-built Pages Router server bundle
-   * (e.g. `dist/server/entry.js`).
+   * Project root directory (e.g. the directory containing `vite.config.ts`).
+   * A Vite preview server is started from this root to serve the pre-built bundle.
+   *
+   * Either `root` or `pagesBundlePath` must be provided.
    */
-  pagesBundlePath: string;
+  root?: string;
+  /**
+   * Absolute path to the pre-built Pages Router server bundle
+   * (e.g. `/tmp/abc/server/entry.js`).
+   *
+   * When provided, `root` is derived from this path and the Vite preview
+   * server's `build.outDir` is set so the `configurePreviewServer` hook finds
+   * the bundle at the correct location. Useful for tests that build to a temp
+   * directory instead of the project's `dist/`.
+   *
+   * Either `root` or `pagesBundlePath` must be provided.
+   */
+  pagesBundlePath?: string;
   /** Discovered page routes (excludes API routes) */
   routes: Route[];
   /** Discovered API routes */
@@ -93,6 +107,7 @@ function toStaticExportResult(routes: PrerenderRouteResult[]): StaticExportResul
 export async function staticExportPages(options: StaticExportOptions): Promise<StaticExportResult> {
   const result = await prerenderPages({
     mode: "export",
+    root: options.root,
     pagesBundlePath: options.pagesBundlePath,
     routes: options.routes,
     apiRoutes: options.apiRoutes,
@@ -111,6 +126,15 @@ export interface AppStaticExportOptions {
    * (e.g. `dist/server/index.js`).
    */
   rscBundlePath: string;
+  /**
+   * Project root directory (e.g. the directory containing `vite.config.ts`).
+   *
+   * Required when `rscBundlePath` lives in a temp dir (e.g. during tests) so
+   * that `startVitePreviewServer` can locate the vite config. When omitted,
+   * the root is derived from `rscBundlePath` (works for in-place builds where
+   * the bundle is at `<root>/dist/server/index.js`).
+   */
+  root?: string;
   /** Output directory */
   outDir: string;
   /** Resolved next.config.js */
@@ -128,6 +152,7 @@ export async function staticExportApp(
   const result = await prerenderApp({
     mode: "export",
     rscBundlePath: options.rscBundlePath,
+    root: options.root,
     routes: options.routes,
     outDir: options.outDir,
     config: options.config,

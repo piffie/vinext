@@ -20,19 +20,17 @@
 
 import path from "node:path";
 import fs from "node:fs";
-import type { PrerenderResult, PrerenderRouteResult } from "./prerender.js";
+import type { PrerenderResult, PrerenderRouteResult, PreviewServerHandle } from "./prerender.js";
 import {
   prerenderApp,
   prerenderPages,
   writePrerenderIndex,
-  loadWrangler,
-  findWranglerConfig,
+  startVitePreviewServer,
 } from "./prerender.js";
 import { loadNextConfig, resolveNextConfig } from "../config/next-config.js";
 import { pagesRouter, apiRouter } from "../routing/pages-router.js";
 import { appRouter } from "../routing/app-router.js";
 import { findDir } from "./report.js";
-import { findInNodeModules } from "../utils/project.js";
 
 // ─── Progress UI ──────────────────────────────────────────────────────────────
 
@@ -82,35 +80,34 @@ export interface RunPrerenderOptions {
    */
   nextConfigOverride?: Partial<import("../config/next-config.js").ResolvedNextConfig>;
   /**
-   * Override the path to the Pages Router server bundle.
-   * Defaults to `<root>/dist/server/entry.js`.
-   * Intended for tests that build to a custom outDir.
-   */
-  pagesBundlePath?: string;
-  /**
    * Override the path to the App Router RSC bundle.
    * Defaults to `<root>/dist/server/index.js`.
    * Intended for tests that build to a custom outDir.
    */
   rscBundlePath?: string;
+  /**
+   * Override the path to the Pages Router server bundle.
+   * Defaults to `<root>/dist/server/entry.js`.
+   * Intended for tests that build to a custom outDir (e.g. a temp directory).
+   * When provided, passed through to `prerenderPages` which derives `buildOutDir`
+   * so the Vite preview server finds the bundle at the correct location.
+   */
+  pagesBundlePath?: string;
 }
 
 /**
  * Run the prerender phase using pre-built production bundles.
  *
- * Scans routes, loads the RSC/Pages handler from the production bundle,
- * renders every static/ISR route, writes output files to
- * `dist/server/prerendered-routes/` (non-export) or `dist/client/` (export),
+ * Scans routes, starts a `vite.preview()` server (with the project's vite.config.ts
+ * so all `configurePreviewServer` hooks run — including platform plugins like
+ * `@cloudflare/vite-plugin`), renders every static/ISR route, writes output files
+ * to `dist/server/prerendered-routes/` (non-export) or `dist/client/` (export),
  * and prints a progress bar + summary to stderr/stdout. Returns the full
  * PrerenderResult so callers can pass it to printBuildReport.
  *
- * Hybrid projects (both `app/` and `pages/` present) run both prerender
- * phases. The merged results are written to a single `dist/server/vinext-prerender.json`.
- *
- * For Cloudflare Workers builds (detected by the presence of `wrangler.json`
- * alongside the RSC bundle), a single `wrangler unstable_startWorker` instance is
- * started, shared across both App Router and Pages Router prerender phases,
- * and disposed in a `finally` block after both phases complete.
+ * Hybrid projects (both `app/` and `pages/` present) share a single preview
+ * server instance across both phases. The merged results are written to a single
+ * `dist/server/vinext-prerender.json`.
  *
  * If a required production bundle does not exist, an error is thrown directing
  * the user to run `vinext build` first.
@@ -164,42 +161,21 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
       ? path.join(root, "dist", "client")
       : path.join(root, "dist", "server", "prerendered-routes");
 
-  // ── Detect Cloudflare Workers build ────────────────────────────────────────
-  // A CF Workers build is detected by checking whether @cloudflare/vite-plugin
-  // is installed in the project's node_modules — the same signal used by the
-  // build command in deploy.ts. This is more reliable than looking for
-  // wrangler.json because that file lives in the project root, not next to the
-  // built bundle.
   const rscBundlePath = options.rscBundlePath ?? path.join(root, "dist", "server", "index.js");
-  const isWorkersBuild = findInNodeModules(root, "@cloudflare/vite-plugin") !== null;
-  // Locate the generated wrangler.json for the unstable_startWorker config option.
-  // The @cloudflare/vite-plugin generates dist/server/wrangler.json during
-  // the build — it includes assets.directory pointing to dist/client, which
-  // is required by wrangler 4+. Fall back to the project root wrangler.jsonc
-  // as a convenience for non-standard setups.
-  const serverDir = path.dirname(rscBundlePath);
-  const wranglerConfigPath = findWranglerConfig(serverDir, root);
 
-  // For CF Workers hybrid builds (app/ + pages/), start wrangler once and
-  // share the instance across both prerender phases. This avoids spinning up
-  // two miniflare instances (expensive) and ensures both phases render against
-  // the same built worker bundle.
+  // For hybrid builds (both app/ and pages/ present), start a single Vite preview
+  // server shared across both prerender phases to avoid spinning up two instances.
+  // The correct platform runtime is provided by whichever configurePreviewServer
+  // hooks are registered in vite.config.ts — no build-target detection needed.
   //
-  // The wrangler instance is imported lazily (it's an optional peer dep —
-  // only installed for CF projects). We resolve it from the project root.
-  type WranglerWorker = Awaited<ReturnType<(typeof import("wrangler"))["unstable_startWorker"]>>;
-  let sharedWranglerDev: WranglerWorker | null = null;
+  // For single-phase builds (app-only or pages-only), no shared server is started
+  // here — prerenderApp / prerenderPages start their own server internally.
+  let sharedPreviewServer: PreviewServerHandle | null = null;
 
   try {
-    if (isWorkersBuild && appDir && pagesDir) {
-      // Hybrid CF build: both phases share one wrangler instance.
-      const wrangler = await loadWrangler(root);
-      sharedWranglerDev = await wrangler.unstable_startWorker({
-        entrypoint: rscBundlePath,
-        config: wranglerConfigPath,
-        bindings: { VINEXT_PRERENDER: { type: "plain_text", value: "1" } },
-        dev: { logLevel: "none" },
-      });
+    if (appDir && pagesDir) {
+      // Hybrid build: start one shared server for both phases.
+      sharedPreviewServer = await startVitePreviewServer(root);
     }
 
     // ── App Router phase ──────────────────────────────────────────────────────
@@ -218,12 +194,8 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
         config,
         rscBundlePath,
         root,
-        // Pass build-type detection results so prerenderApp doesn't repeat them.
-        isWorkersBuild,
-        wranglerConfigPath,
-        // For hybrid CF builds pass the shared wrangler instance via internal field.
-        // prerenderApp will use it instead of starting its own.
-        ...(sharedWranglerDev ? { _wranglerDev: sharedWranglerDev } : {}),
+        // Pass shared server for hybrid builds; single-phase builds start their own.
+        ...(sharedPreviewServer ? { _previewServer: sharedPreviewServer } : {}),
         onProgress: ({ total, route }) => {
           if (appTotal === 0) {
             appTotal = total;
@@ -253,13 +225,13 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
         outDir,
         skipManifest: true,
         config,
-        // For CF builds, use the shared wrangler instance instead of a plain Node bundle.
-        // For plain Node builds, fall back to the pages bundle path.
-        ...(sharedWranglerDev
-          ? { _wranglerDev: sharedWranglerDev }
+        // Pass shared server for hybrid builds; pages-only builds start their own
+        // via startVitePreviewServer (using options.root).
+        ...(sharedPreviewServer
+          ? { _previewServer: sharedPreviewServer }
           : {
-              pagesBundlePath:
-                options.pagesBundlePath ?? path.join(root, "dist", "server", "entry.js"),
+              root,
+              ...(options.pagesBundlePath ? { pagesBundlePath: options.pagesBundlePath } : {}),
             }),
         onProgress: ({ total, route }) => {
           if (pagesTotal === 0) {
@@ -274,9 +246,9 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
       allRoutes.push(...result.routes);
     }
   } finally {
-    // Dispose the shared wrangler instance if we started one.
-    if (sharedWranglerDev) {
-      await sharedWranglerDev.dispose();
+    // Dispose the shared preview server if we started one.
+    if (sharedPreviewServer) {
+      await sharedPreviewServer.dispose();
     }
   }
 

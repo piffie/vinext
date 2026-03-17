@@ -3061,6 +3061,213 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           });
         };
       },
+
+      // ── Preview server ─────────────────────────────────────────────────────
+      // Registers a catch-all middleware that loads the built production bundle
+      // (App Router: dist/server/index.js, Pages Router: dist/server/entry.js)
+      // and converts Node IncomingMessage → Web Request → Node ServerResponse.
+      //
+      // This hook runs for all builds. When @cloudflare/vite-plugin or
+      // @vitejs/plugin-rsc handle the request first (e.g. App Router), their
+      // middleware takes precedence and this catch-all is never reached. For
+      // Pages-only Node builds there is no other handler, so this middleware
+      // serves every request.
+      configurePreviewServer(server) {
+        return async () => {
+          const root = server.config.root;
+          const outDir = path.resolve(root, server.config.build.outDir ?? "dist");
+          const rscEntryPath = path.join(outDir, "server", "index.js");
+          const pagesEntryPath = path.join(outDir, "server", "entry.js");
+          const isAppRouter = fs.existsSync(rscEntryPath);
+          const entryPath = isAppRouter ? rscEntryPath : pagesEntryPath;
+
+          if (!fs.existsSync(entryPath)) return;
+
+          const mtime = fs.statSync(entryPath).mtimeMs;
+          const mod = await import(`${pathToFileURL(entryPath).href}?t=${mtime}`);
+
+          // Resolve the request handler. App Router exports either a default
+          // function or a Worker-style { fetch() } object. Pages Router exports
+          // renderPage() + handleApiRoute() + runMiddleware() + vinextConfig.
+          let handle: (
+            req: import("node:http").IncomingMessage,
+            res: import("node:http").ServerResponse,
+          ) => Promise<void>;
+
+          if (isAppRouter) {
+            let appHandler: (request: Request) => Promise<Response>;
+            if (typeof mod.default === "function") {
+              appHandler = mod.default;
+            } else if (mod.default && typeof mod.default.fetch === "function") {
+              appHandler = (req) => mod.default.fetch(req);
+            } else {
+              return; // Unexpected bundle shape — skip
+            }
+
+            handle = async (req, res) => {
+              const rawUrl = req.url ?? "/";
+              const rawPathname = rawUrl.split("?")[0].replaceAll("\\", "/");
+              let pathname: string;
+              try {
+                pathname = normalizePath(normalizePathnameForRouteMatchStrict(rawPathname));
+              } catch {
+                res.writeHead(400);
+                res.end("Bad Request");
+                return;
+              }
+              if (rawPathname.startsWith("//")) {
+                res.writeHead(404);
+                res.end("Not Found");
+                return;
+              }
+              const qs = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
+              const normalizedUrl = pathname + qs;
+              const headers = new Headers();
+              for (const [k, v] of Object.entries(req.headers)) {
+                if (v === undefined) continue;
+                if (Array.isArray(v)) for (const s of v) headers.append(k, s);
+                else headers.set(k, v);
+              }
+              const request = new Request(`http://localhost${normalizedUrl}`, {
+                method: req.method ?? "GET",
+                headers,
+              });
+              const response = await appHandler(request);
+              const nodeHeaders: Record<string, string | string[]> = {};
+              response.headers.forEach((value, key) => {
+                const existing = nodeHeaders[key];
+                if (existing !== undefined) {
+                  nodeHeaders[key] = Array.isArray(existing)
+                    ? [...existing, value]
+                    : [existing, value];
+                } else {
+                  nodeHeaders[key] = value;
+                }
+              });
+              res.writeHead(response.status, nodeHeaders);
+              if (response.body) {
+                const { Readable } = await import("node:stream");
+                const nodeStream = Readable.fromWeb(
+                  response.body as import("stream/web").ReadableStream,
+                );
+                nodeStream.pipe(res);
+              } else {
+                res.end();
+              }
+            };
+          } else {
+            // Pages Router bundle
+            if (typeof mod.renderPage !== "function") {
+              return; // Unexpected bundle shape — skip
+            }
+            const renderPage = mod.renderPage as (
+              request: Request,
+              url: string,
+              manifest: Record<string, string[]>,
+            ) => Promise<Response>;
+            const handleApiRoute = mod.handleApiRoute as
+              | ((request: Request, url: string) => Promise<Response>)
+              | undefined;
+
+            handle = async (req, res) => {
+              const rawUrl = req.url ?? "/";
+              const rawPathname = rawUrl.split("?")[0].replaceAll("\\", "/");
+              let pathname: string;
+              try {
+                pathname = normalizePath(normalizePathnameForRouteMatchStrict(rawPathname));
+              } catch {
+                res.writeHead(400);
+                res.end("Bad Request");
+                return;
+              }
+              const qs = rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?")) : "";
+              const normalizedUrl = pathname + qs;
+              const headers = new Headers();
+              for (const [k, v] of Object.entries(req.headers)) {
+                if (v === undefined) continue;
+                if (Array.isArray(v)) for (const s of v) headers.append(k, s);
+                else headers.set(k, v);
+              }
+              const request = new Request(`http://localhost${normalizedUrl}`, {
+                method: req.method ?? "GET",
+                headers,
+              });
+              // Handle prerender pages-static-paths endpoint
+              if (pathname === "/__vinext/prerender/pages-static-paths") {
+                const searchParams = new URLSearchParams(qs.startsWith("?") ? qs.slice(1) : qs);
+                const pattern = searchParams.get("pattern");
+                const localesStr = searchParams.get("locales");
+                const defaultLocale = searchParams.get("defaultLocale") ?? "";
+                const locales = localesStr ? (JSON.parse(localesStr) as string[]) : [];
+
+                const pageRoutes = mod.pageRoutes as Array<{
+                  pattern: string;
+                  isDynamic: boolean;
+                  module: {
+                    getStaticPaths?: (ctx: {
+                      locales: string[];
+                      defaultLocale: string;
+                    }) => Promise<unknown>;
+                  };
+                }>;
+                const route = pageRoutes?.find((r) => r.pattern === pattern);
+
+                if (!route || typeof route.module?.getStaticPaths !== "function") {
+                  res.writeHead(200, { "Content-Type": "application/json" });
+                  res.end("null");
+                  return;
+                }
+
+                try {
+                  const result = await route.module.getStaticPaths({ locales, defaultLocale });
+                  res.writeHead(200, { "Content-Type": "application/json" });
+                  res.end(JSON.stringify(result));
+                } catch {
+                  res.writeHead(500);
+                  res.end("Internal Server Error");
+                }
+                return;
+              }
+
+              let response: Response;
+              if (handleApiRoute && pathname.startsWith("/api/")) {
+                response = await handleApiRoute(request, normalizedUrl);
+              } else {
+                response = await renderPage(request, normalizedUrl, {});
+              }
+              const nodeHeaders: Record<string, string | string[]> = {};
+              response.headers.forEach((value, key) => {
+                const existing = nodeHeaders[key];
+                if (existing !== undefined) {
+                  nodeHeaders[key] = Array.isArray(existing)
+                    ? [...existing, value]
+                    : [existing, value];
+                } else {
+                  nodeHeaders[key] = value;
+                }
+              });
+              res.writeHead(response.status, nodeHeaders);
+              if (response.body) {
+                const { Readable } = await import("node:stream");
+                const nodeStream = Readable.fromWeb(
+                  response.body as import("stream/web").ReadableStream,
+                );
+                nodeStream.pipe(res);
+              } else {
+                res.end();
+              }
+            };
+          }
+
+          server.middlewares.use(async (req, res, next) => {
+            try {
+              await handle(req, res);
+            } catch (e) {
+              next(e);
+            }
+          });
+        };
+      },
     },
     // Strip server-only data-fetching exports (getServerSideProps, getStaticProps,
     // getStaticPaths) from page modules in the client bundle. These functions

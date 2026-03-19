@@ -704,6 +704,89 @@ async function readBodyWithLimit(request, maxBytes) {
   return chunks.join("");
 }
 
+/**
+ * Render a 404 or 500 error page through the custom _document (if any).
+ *
+ * Resolution order mirrors Next.js:
+ *   404 -> pages/404 -> pages/_error -> plain text fallback
+ *   500 -> pages/500 -> pages/_error -> plain text fallback
+ *
+ * NOTE: In the Cloudflare Workers runtime there is no Node.js IncomingMessage /
+ * ServerResponse, so ctx.req / ctx.res are not passed to DocumentContext.
+ * Custom documents that inspect ctx.req will receive undefined — this is an
+ * intentional limitation for now and is documented here.
+ */
+async function renderErrorPageResponse(statusCode, url, request) {
+  var candidates = statusCode === 404
+    ? ["/404", "/_error"]
+    : statusCode === 500
+    ? ["/500", "/_error"]
+    : ["/_error"];
+
+  for (var ci = 0; ci < candidates.length; ci++) {
+    var candidate = candidates[ci];
+    var errorRoute = null;
+    for (var ri = 0; ri < pageRoutes.length; ri++) {
+      if (pageRoutes[ri].pattern === candidate) { errorRoute = pageRoutes[ri]; break; }
+    }
+    if (!errorRoute) continue;
+    var ErrorComponent = errorRoute.module.default;
+    if (!ErrorComponent) continue;
+
+    var errorProps = { statusCode: statusCode };
+    var errorElement;
+    if (AppComponent) {
+      errorElement = React.createElement(AppComponent, { Component: ErrorComponent, pageProps: errorProps });
+    } else {
+      errorElement = React.createElement(ErrorComponent, errorProps);
+    }
+    errorElement = wrapWithRouterContext(errorElement);
+    var bodyHtml = await renderToStringAsync(errorElement);
+
+    var html;
+    if (DocumentComponent) {
+      var _docErrProps = {};
+      var _DocErrClass = DocumentComponent;
+      if (typeof _DocErrClass.getInitialProps === "function") {
+        try {
+          var _docErrCtx = {
+            // NOTE: req/res are not available in the Workers runtime.
+            // ctx.req / ctx.res will be undefined for production Workers builds.
+            pathname: (url || "/").split("?")[0] || "/",
+            query: request ? Object.fromEntries(new URL(request.url).searchParams.entries()) : {},
+            asPath: url || "/",
+            // renderPage is a no-op in vinext — the body is streamed separately.
+            // Returning empty html here is an intentional architectural deviation
+            // from Next.js (where renderPage actually renders the app). CSS-in-JS
+            // libraries that rely on renderPage for style extraction will get an
+            // empty html string; see buildDocumentContext in dev-server.ts for more.
+            renderPage: async () => ({ html: "" }),
+            defaultGetInitialProps: async (ctx) => ctx.renderPage(),
+          };
+          _docErrProps = await _DocErrClass.getInitialProps(_docErrCtx);
+        } catch (e) {
+          console.error("[vinext] _document.getInitialProps threw during error page render:", e);
+          throw e;
+        }
+      }
+      var docErrElement = React.createElement(DocumentComponent, _docErrProps);
+      var docErrHtml = await renderToStringAsync(docErrElement);
+      docErrHtml = docErrHtml.replace("__NEXT_MAIN__", bodyHtml);
+      docErrHtml = docErrHtml.replace("<!-- __NEXT_SCRIPTS__ -->", "");
+      html = docErrHtml;
+    } else {
+      html = "<!DOCTYPE html>\\n<html>\\n<head>\\n  <meta charset=\\"utf-8\\" />\\n  <meta name=\\"viewport\\" content=\\"width=device-width, initial-scale=1\\" />\\n</head>\\n<body>\\n  <div id=\\"__next\\">" + bodyHtml + "</div>\\n</body>\\n</html>";
+    }
+    return new Response(html, { status: statusCode, headers: { "Content-Type": "text/html" } });
+  }
+
+  // No custom error page found — plain text fallback
+  return new Response(
+    statusCode + " - " + (statusCode === 404 ? "Page not found" : "Internal Server Error"),
+    { status: statusCode, headers: { "Content-Type": "text/plain" } }
+  );
+}
+
 export async function renderPage(request, url, manifest, ctx) {
   if (ctx) return _runWithExecutionContext(ctx, () => _renderPage(request, url, manifest));
   return _renderPage(request, url, manifest);
@@ -733,8 +816,7 @@ async function _renderPage(request, url, manifest) {
 
   const match = matchRoute(routeUrl, pageRoutes);
   if (!match) {
-    return new Response("<!DOCTYPE html><html><body><h1>404 - Page not found</h1></body></html>",
-      { status: 404, headers: { "Content-Type": "text/html" } });
+    return renderErrorPageResponse(404, routeUrl, request);
   }
 
   const { route, params } = match;
@@ -793,8 +875,7 @@ async function _renderPage(request, url, manifest) {
           });
         });
         if (!isValidPath) {
-          return new Response("<!DOCTYPE html><html><body><h1>404 - Page not found</h1></body></html>",
-            { status: 404, headers: { "Content-Type": "text/html" } });
+          return renderErrorPageResponse(404, routeUrl, request);
         }
       }
     }
@@ -822,7 +903,7 @@ async function _renderPage(request, url, manifest) {
         return new Response(null, { status: gsspStatus, headers: { Location: sanitizeDestinationLocal(result.redirect.destination) } });
       }
       if (result && result.notFound) {
-        return new Response("404", { status: 404 });
+        return renderErrorPageResponse(404, routeUrl, request);
       }
       // Preserve the res object so headers/status/cookies set by gSSP
       // can be merged into the final HTML response.
@@ -963,7 +1044,7 @@ async function _renderPage(request, url, manifest) {
         return new Response(null, { status: gspStatus, headers: { Location: sanitizeDestinationLocal(result.redirect.destination) } });
       }
       if (result && result.notFound) {
-        return new Response("404", { status: 404 });
+        return renderErrorPageResponse(404, routeUrl, request);
       }
       if (typeof result.revalidate === "number" && result.revalidate > 0) {
         isrRevalidateSeconds = result.revalidate;
@@ -1029,9 +1110,16 @@ async function _renderPage(request, url, manifest) {
       if (typeof _DocClass.getInitialProps === "function") {
         try {
           var _docCtx = {
+            // NOTE: req/res are not available in the Workers runtime.
+            // ctx.req / ctx.res will be undefined for production Workers builds.
             pathname: url.split("?")[0] || "/",
             query: Object.fromEntries(new URL(request.url).searchParams.entries()),
             asPath: url,
+            // renderPage is a no-op in vinext — the body is streamed separately.
+            // Returning empty html here is an intentional architectural deviation
+            // from Next.js (where renderPage actually renders the app). CSS-in-JS
+            // libraries that rely on renderPage for style extraction will get an
+            // empty html string; see buildDocumentContext in dev-server.ts for more.
             renderPage: async () => ({ html: "" }),
             defaultGetInitialProps: async (ctx) => ctx.renderPage(),
           };

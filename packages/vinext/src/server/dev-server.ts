@@ -108,6 +108,12 @@ function buildDocumentContext(
     }
   }
   const renderPage = async (): Promise<import("../shims/document.js").DocumentInitialProps> => ({
+    // NOTE: renderPage is intentionally a no-op in vinext — the app body is
+    // streamed separately rather than being rendered inside renderPage as Next.js
+    // does. This is an intentional architectural deviation: css-in-js libraries
+    // that rely on renderPage for style extraction (e.g. styled-components)
+    // will receive an empty html string. The real body content comes from the
+    // SSR stream that replaces __NEXT_MAIN__ after document rendering.
     html: "",
   });
   const ctx: import("../shims/document.js").DocumentContext = {
@@ -171,8 +177,13 @@ async function streamPageToResponse(
       ) => Promise<Record<string, unknown>>;
     };
     if (typeof DocClass.getInitialProps === "function") {
-      const ctx = buildDocumentContext(req, url, res);
-      docProps = await DocClass.getInitialProps(ctx);
+      try {
+        const ctx = buildDocumentContext(req, url, res);
+        docProps = await DocClass.getInitialProps(ctx);
+      } catch (e) {
+        console.error("[vinext] _document.getInitialProps threw during page render:", e);
+        throw e;
+      }
     }
     const docElement = React.createElement(
       DocumentComponent,

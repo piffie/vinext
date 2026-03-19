@@ -6,6 +6,9 @@
  */
 
 declare module "next/document" {
+  // NOTE: Keep these types in sync with shims/document.tsx — the runtime
+  // implementation. If you update DocumentContext or DocumentInitialProps in
+  // document.tsx, update them here too (and vice versa).
   import type { IncomingMessage, ServerResponse } from "node:http";
   import { Component, type HTMLAttributes, type ReactNode, type ReactElement } from "react";
 

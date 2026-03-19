@@ -93,12 +93,8 @@ const STREAM_BODY_MARKER = "<!--VINEXT_STREAM_BODY-->";
 function buildDocumentContext(
   req: IncomingMessage,
   url: string,
+  res?: ServerResponse,
 ): import("../shims/document.js").DocumentContext {
-  const defaultGetInitialProps = async (): Promise<
-    import("../shims/document.js").DocumentInitialProps
-  > => ({
-    html: "",
-  });
   const [pathname, search] = url.split("?");
   const query: Record<string, string | string[] | undefined> = {};
   if (search) {
@@ -111,14 +107,19 @@ function buildDocumentContext(
       }
     }
   }
-  return {
+  const renderPage = async (): Promise<import("../shims/document.js").DocumentInitialProps> => ({
+    html: "",
+  });
+  const ctx: import("../shims/document.js").DocumentContext = {
     pathname: pathname || "/",
     query,
     asPath: url,
     req,
-    renderPage: async () => ({ html: "" }),
-    defaultGetInitialProps,
+    res,
+    renderPage,
+    defaultGetInitialProps: async (c) => c.renderPage(),
   };
+  return ctx;
 }
 
 async function streamPageToResponse(
@@ -170,12 +171,8 @@ async function streamPageToResponse(
       ) => Promise<Record<string, unknown>>;
     };
     if (typeof DocClass.getInitialProps === "function") {
-      try {
-        const ctx = buildDocumentContext(req, url);
-        docProps = await DocClass.getInitialProps(ctx);
-      } catch {
-        // If getInitialProps fails, fall back to rendering with no props
-      }
+      const ctx = buildDocumentContext(req, url, res);
+      docProps = await DocClass.getInitialProps(ctx);
     }
     const docElement = React.createElement(
       DocumentComponent,
@@ -1178,7 +1175,26 @@ async function renderErrorPage(
       }
 
       if (DocumentComponent) {
-        const docElement = createElement(DocumentComponent);
+        // Call getInitialProps for error pages too — same as normal pages.
+        let docErrorProps: Record<string, unknown> = {};
+        const DocErrorClass = DocumentComponent as unknown as {
+          getInitialProps?: (
+            ctx: import("../shims/document.js").DocumentContext,
+          ) => Promise<Record<string, unknown>>;
+        };
+        if (typeof DocErrorClass.getInitialProps === "function") {
+          try {
+            const errCtx = buildDocumentContext(_req, url, res);
+            docErrorProps = await DocErrorClass.getInitialProps(errCtx);
+          } catch (e) {
+            console.error("[vinext] _document.getInitialProps threw during error page render:", e);
+            throw e;
+          }
+        }
+        const docElement = createElement(
+          DocumentComponent,
+          docErrorProps as React.ComponentProps<typeof DocumentComponent>,
+        );
         let docHtml = await renderToStringAsync(docElement);
         docHtml = docHtml.replace("__NEXT_MAIN__", bodyHtml);
         docHtml = docHtml.replace("<!-- __NEXT_SCRIPTS__ -->", "");

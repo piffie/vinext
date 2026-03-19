@@ -1021,7 +1021,27 @@ async function _renderPage(request, url, manifest) {
     var BODY_MARKER = "<!--VINEXT_STREAM_BODY-->";
     var shellHtml;
     if (DocumentComponent) {
-      const docElement = React.createElement(DocumentComponent);
+      // Call getInitialProps if the custom Document class defines it,
+      // mirroring the dev-server behavior so props (e.g. a theme) are
+      // available during rendering in production.
+      var _docProps = {};
+      var _DocClass = DocumentComponent;
+      if (typeof _DocClass.getInitialProps === "function") {
+        try {
+          var _docCtx = {
+            pathname: url.split("?")[0] || "/",
+            query: Object.fromEntries(new URL(request.url).searchParams.entries()),
+            asPath: url,
+            renderPage: async () => ({ html: "" }),
+            defaultGetInitialProps: async (ctx) => ctx.renderPage(),
+          };
+          _docProps = await _DocClass.getInitialProps(_docCtx);
+        } catch (e) {
+          console.error("[vinext] _document.getInitialProps threw:", e);
+          throw e;
+        }
+      }
+      const docElement = React.createElement(DocumentComponent, _docProps);
       shellHtml = await renderToStringAsync(docElement);
       shellHtml = shellHtml.replace("__NEXT_MAIN__", BODY_MARKER);
       if (ssrHeadHTML || assetTags || fontHeadHTML) {

@@ -83,11 +83,50 @@ const STREAM_BODY_MARKER = "<!--VINEXT_STREAM_BODY-->";
  * deferring them reduces TTFB and lets the browser start parsing the
  * shell sooner).
  */
+/**
+ * Build a minimal DocumentContext for calling _document.getInitialProps.
+ *
+ * Next.js DocumentContext includes renderPage, defaultGetInitialProps,
+ * req/res, pathname, query, asPath, and locale info. We provide the
+ * subset that custom documents typically use.
+ */
+function buildDocumentContext(
+  req: IncomingMessage,
+  url: string,
+): import("../shims/document.js").DocumentContext {
+  const defaultGetInitialProps = async (): Promise<
+    import("../shims/document.js").DocumentInitialProps
+  > => ({
+    html: "",
+  });
+  const [pathname, search] = url.split("?");
+  const query: Record<string, string | string[] | undefined> = {};
+  if (search) {
+    for (const [k, v] of new URLSearchParams(search)) {
+      const existing = query[k];
+      if (existing !== undefined) {
+        query[k] = Array.isArray(existing) ? [...existing, v] : [existing, v];
+      } else {
+        query[k] = v;
+      }
+    }
+  }
+  return {
+    pathname: pathname || "/",
+    query,
+    asPath: url,
+    req,
+    renderPage: async () => ({ html: "" }),
+    defaultGetInitialProps,
+  };
+}
+
 async function streamPageToResponse(
   res: ServerResponse,
   element: React.ReactElement,
   options: {
     url: string;
+    req: IncomingMessage;
     server: ViteDevServer;
     fontHeadHTML: string;
     scripts: string;
@@ -100,6 +139,7 @@ async function streamPageToResponse(
 ): Promise<void> {
   const {
     url,
+    req,
     server,
     fontHeadHTML,
     scripts,
@@ -121,7 +161,26 @@ async function streamPageToResponse(
   let shellTemplate: string;
 
   if (DocumentComponent) {
-    const docElement = React.createElement(DocumentComponent);
+    // Call getInitialProps if the custom Document class defines it.
+    // This allows documents to augment props (e.g. inject a theme prop).
+    let docProps: Record<string, unknown> = {};
+    const DocClass = DocumentComponent as unknown as {
+      getInitialProps?: (
+        ctx: import("../shims/document.js").DocumentContext,
+      ) => Promise<Record<string, unknown>>;
+    };
+    if (typeof DocClass.getInitialProps === "function") {
+      try {
+        const ctx = buildDocumentContext(req, url);
+        docProps = await DocClass.getInitialProps(ctx);
+      } catch {
+        // If getInitialProps fails, fall back to rendering with no props
+      }
+    }
+    const docElement = React.createElement(
+      DocumentComponent,
+      docProps as React.ComponentProps<typeof DocumentComponent>,
+    );
     let docHtml = await renderToStringAsync(docElement);
     // Replace __NEXT_MAIN__ with our stream marker
     docHtml = docHtml.replace("__NEXT_MAIN__", STREAM_BODY_MARKER);
@@ -942,6 +1001,7 @@ hydrate();
         // Suspense content streams in as it resolves.
         await streamPageToResponse(res, element, {
           url,
+          req,
           server,
           fontHeadHTML,
           scripts: allScripts,

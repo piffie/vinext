@@ -29,7 +29,7 @@ describe("unified-request-context", () => {
       const ctx = getRequestContext();
       expect(ctx).toBeDefined();
       expect(ctx.headersContext).toBeNull();
-      expect(ctx.dynamicUsageDetected).toBe(false);
+      expect(ctx.dynamicUsageCount).toBe(0);
       expect(ctx.pendingSetCookies).toEqual([]);
       expect(ctx.draftModeCookieHeader).toBeNull();
       expect(ctx.phase).toBe("render");
@@ -46,12 +46,12 @@ describe("unified-request-context", () => {
 
     it("returns a fresh detached context on each call outside any scope", () => {
       const first = getRequestContext();
-      first.dynamicUsageDetected = true;
+      first.dynamicUsageCount = 1;
       first.pendingSetCookies.push("first=1");
 
       const second = getRequestContext();
       expect(second).not.toBe(first);
-      expect(second.dynamicUsageDetected).toBe(false);
+      expect(second.dynamicUsageCount).toBe(0);
       expect(second.pendingSetCookies).toEqual([]);
     });
 
@@ -83,7 +83,7 @@ describe("unified-request-context", () => {
         expect((ctx.headersContext as any).headers.get("x-test")).toBe("1");
         expect((ctx.headersContext as any).cookies.get("session")).toBe("abc");
         expect(ctx.executionContext).toBe(fakeCtx);
-        expect(ctx.dynamicUsageDetected).toBe(false);
+        expect(ctx.dynamicUsageCount).toBe(0);
         expect(ctx.phase).toBe("render");
         expect(ctx.i18nContext).toBeNull();
         expect(ctx.pendingSetCookies).toEqual([]);
@@ -161,11 +161,11 @@ describe("unified-request-context", () => {
       const ctxB = createRequestContext();
 
       const pA = runWithRequestContext(ctxA, async () => {
-        getRequestContext().dynamicUsageDetected = true;
+        getRequestContext().dynamicUsageCount = 1;
         getRequestContext().pendingSetCookies.push("a=1");
         await new Promise<void>((resolve) => setTimeout(resolve, 5));
         return {
-          dynamic: getRequestContext().dynamicUsageDetected,
+          dynamic: getRequestContext().dynamicUsageCount,
           cookies: [...getRequestContext().pendingSetCookies],
         };
       });
@@ -173,7 +173,7 @@ describe("unified-request-context", () => {
       const pB = runWithRequestContext(ctxB, async () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 1));
         return {
-          dynamic: getRequestContext().dynamicUsageDetected,
+          dynamic: getRequestContext().dynamicUsageCount,
           cookies: [...getRequestContext().pendingSetCookies],
         };
       });
@@ -270,7 +270,7 @@ describe("unified-request-context", () => {
     it("each sub-state getter returns correct sub-fields", () => {
       const reqCtx = createRequestContext({
         headersContext: { headers: new Headers(), cookies: new Map() },
-        dynamicUsageDetected: true,
+        dynamicUsageCount: 1,
         pendingSetCookies: ["a=b"],
         draftModeCookieHeader: "c=d",
         phase: "action",
@@ -284,7 +284,7 @@ describe("unified-request-context", () => {
 
       void runWithRequestContext(reqCtx, () => {
         const ctx = getRequestContext();
-        expect(ctx.dynamicUsageDetected).toBe(true);
+        expect(ctx.dynamicUsageCount).toBe(1);
         expect(ctx.pendingSetCookies).toEqual(["a=b"]);
         expect(ctx.draftModeCookieHeader).toBe("c=d");
         expect(ctx.phase).toBe("action");
@@ -319,7 +319,7 @@ describe("unified-request-context", () => {
       void runWithRequestContext(
         createRequestContext({
           headersContext: outerHeaders,
-          dynamicUsageDetected: true,
+          dynamicUsageCount: 1,
           pendingSetCookies: ["outer=1"],
           draftModeCookieHeader: "outer=draft",
           phase: "action",
@@ -328,12 +328,12 @@ describe("unified-request-context", () => {
           void runWithHeadersContext(innerHeaders as any, () => {
             const ctx = getRequestContext();
             expect((ctx.headersContext as any).headers.get("x-id")).toBe("inner");
-            expect(ctx.dynamicUsageDetected).toBe(false);
+            expect(ctx.dynamicUsageCount).toBe(0);
             expect(ctx.pendingSetCookies).toEqual([]);
             expect(ctx.draftModeCookieHeader).toBeNull();
             expect(ctx.phase).toBe("render");
 
-            ctx.dynamicUsageDetected = true;
+            ctx.dynamicUsageCount = 1;
             ctx.pendingSetCookies.push("inner=1");
             ctx.draftModeCookieHeader = "inner=draft";
             ctx.phase = "route-handler";
@@ -341,7 +341,7 @@ describe("unified-request-context", () => {
 
           const ctx = getRequestContext();
           expect(ctx.headersContext).toBe(outerHeaders);
-          expect(ctx.dynamicUsageDetected).toBe(true);
+          expect(ctx.dynamicUsageCount).toBe(1);
           expect(ctx.pendingSetCookies).toEqual(["outer=1"]);
           expect(ctx.draftModeCookieHeader).toBe("outer=draft");
           expect(ctx.phase).toBe("action");
@@ -513,7 +513,7 @@ describe("unified-request-context", () => {
     it("creates context with all defaults", () => {
       const ctx = createRequestContext();
       expect(ctx.headersContext).toBeNull();
-      expect(ctx.dynamicUsageDetected).toBe(false);
+      expect(ctx.dynamicUsageCount).toBe(0);
       expect(ctx.pendingSetCookies).toEqual([]);
       expect(ctx.draftModeCookieHeader).toBeNull();
       expect(ctx.phase).toBe("render");
@@ -531,10 +531,10 @@ describe("unified-request-context", () => {
     it("merges partial overrides", () => {
       const ctx = createRequestContext({
         phase: "action",
-        dynamicUsageDetected: true,
+        dynamicUsageCount: 1,
       });
       expect(ctx.phase).toBe("action");
-      expect(ctx.dynamicUsageDetected).toBe(true);
+      expect(ctx.dynamicUsageCount).toBe(1);
       // Other fields get defaults
       expect(ctx.i18nContext).toBeNull();
       expect(ctx.headersContext).toBeNull();

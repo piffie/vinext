@@ -2373,6 +2373,9 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
       const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+      // Clear dynamic usage accumulated by pipeline stages (middleware,
+      // headers context setup) so we only detect the handler's own usage.
+      consumeDynamicUsage();
       try {
         const response = await handlerFn(__proxiedRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();

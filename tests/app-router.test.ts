@@ -3826,4 +3826,21 @@ describe("generateRscEntry ISR code generation", () => {
     expect(code).toContain("__isrSet(__routeKey,");
     expect(code).toContain('kind: "APP_ROUTE"');
   });
+
+  it("generated code tracks dynamic route handlers to skip cache on subsequent requests", () => {
+    const code = generateRscEntry("/tmp/test/app", minimalRoutes);
+    // Module-level set for remembering dynamic handlers
+    expect(code).toContain("__dynamicRouteHandlers");
+    // Cache read path checks the set before reading
+    expect(code).toContain("!__dynamicRouteHandlers.has(handler.pattern)");
+    // Handler execution path adds to set when dynamic usage detected
+    expect(code).toContain("__dynamicRouteHandlers.add(handler.pattern)");
+  });
+
+  it("generated code wraps route handler request in a dynamic-detection proxy", () => {
+    const code = generateRscEntry("/tmp/test/app", minimalRoutes);
+    expect(code).toContain("__proxyRouteRequest");
+    // The proxied request is passed to the handler, not the raw request
+    expect(code).toContain("handlerFn(__proxiedRequest,");
+  });
 });

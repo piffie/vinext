@@ -495,6 +495,44 @@ const __isrDebug = process.env.NEXT_PRIVATE_DEBUG_CACHE
   ? console.debug.bind(console, "[vinext] ISR:")
   : undefined;
 
+// Track route handler patterns that have used dynamic APIs (headers, cookies,
+// searchParams). On first request (cache MISS), the handler runs and we detect
+// dynamic usage. On subsequent requests, we skip the cache read for handlers
+// in this set, matching Next.js behavior where dynamic handlers are never cached.
+const __dynamicRouteHandlers = new Set<string>();
+
+// Wrap the Request passed to route handlers in a Proxy that detects dynamic
+// API access. Accessing request.headers or request.nextUrl.searchParams marks
+// the handler as dynamic, preventing ISR caching. This matches Next.js's
+// NextRequest behavior where certain property accesses opt out of static
+// generation.
+function __proxyRouteRequest(req: Request, markDynamic: () => void): Request {
+  let _nextUrl: URL | undefined;
+  return new Proxy(req, {
+    get(target, prop, receiver) {
+      // Accessing .headers marks as dynamic (headers vary per request)
+      if (prop === "headers") {
+        markDynamic();
+        return Reflect.get(target, prop, receiver);
+      }
+      // .nextUrl returns a proxied URL where .searchParams triggers dynamic
+      if (prop === "nextUrl") {
+        if (!_nextUrl) {
+          const realUrl = new URL(target.url);
+          _nextUrl = new Proxy(realUrl, {
+            get(urlTarget, urlProp, urlReceiver) {
+              if (urlProp === "searchParams") markDynamic();
+              return Reflect.get(urlTarget, urlProp, urlReceiver);
+            },
+          }) as URL;
+        }
+        return _nextUrl;
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
 // Normalize null-prototype objects from matchPattern() into thenable objects
 // that work both as Promises (for Next.js 15+ async params) and as plain
 // objects with synchronous property access (for pre-15 code like params.id).
@@ -2257,11 +2295,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
     // ISR cache read for route handlers (production only).
     // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
-    // This runs before handler execution so a cache HIT skips the handler entirely.
+    // Skip cache read if this handler pattern was previously detected as dynamic
+    // (accessed headers, cookies, or searchParams on a prior request).
     if (
       process.env.NODE_ENV === "production" &&
       revalidateSeconds !== null &&
       handler.dynamic !== "force-dynamic" &&
+      !__dynamicRouteHandlers.has(handler.pattern) &&
       (method === "GET" || isAutoHead) &&
       typeof handlerFn === "function"
     ) {
@@ -2304,6 +2344,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
               const __regenDynamic = consumeDynamicUsage();
               setNavigationContext(null);
               if (__regenDynamic) {
+                __dynamicRouteHandlers.add(handler.pattern);
                 __isrDebug?.("route regen skipped (dynamic usage)", cleanPathname);
                 return;
               }
@@ -2336,10 +2377,19 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
+      // Wrap request in a Proxy that detects dynamic API access (headers,
+      // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
+      // cache write path knows to skip caching for this handler.
+      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
       try {
-        const response = await handlerFn(request, { params });
+        const response = await handlerFn(__proxiedRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();
         const handlerSetCacheControl = response.headers.has("cache-control");
+
+        // Remember this handler as dynamic so future requests skip cache read.
+        if (dynamicUsedInHandler) {
+          __dynamicRouteHandlers.add(handler.pattern);
+        }
 
         // Apply Cache-Control from route segment config (export const revalidate = N).
         // Runtime request APIs like headers() / cookies() make GET handlers dynamic,

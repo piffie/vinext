@@ -429,7 +429,7 @@ function patternToNextFormat(pattern) {
     .replace(/:([\\w]+)/g, "[$1]");
 }
 
-function collectAssetTags(manifest, moduleIds) {
+function collectAssetTags(manifest, moduleIds, eagerModuleIds) {
   // Fall back to embedded manifest (set by vinext:cloudflare-build for Workers)
   const m = (manifest && Object.keys(manifest).length > 0)
     ? manifest
@@ -443,6 +443,35 @@ function collectAssetTags(manifest, moduleIds) {
   // chunks behind React.lazy() or next/dynamic boundaries).
   var lazyChunks = (typeof globalThis !== "undefined" && globalThis.__VINEXT_LAZY_CHUNKS__) || null;
   var lazySet = lazyChunks && lazyChunks.length > 0 ? new Set(lazyChunks) : null;
+
+  // Build a set of files that should bypass the lazySet filter even if they
+  // are technically reached via dynamic import. Used for _app: it is
+  // dynamically imported at hydration time, but since it is needed on every
+  // page we preload it unconditionally so the browser can fetch it in parallel
+  // with the entry script rather than waiting until hydrate() runs.
+  var eagerFiles = null;
+  if (lazySet && m && eagerModuleIds && eagerModuleIds.length > 0) {
+    eagerFiles = new Set();
+    for (var ei = 0; ei < eagerModuleIds.length; ei++) {
+      var eid = eagerModuleIds[ei];
+      var efiles = m[eid];
+      if (!efiles) {
+        for (var emk in m) {
+          if (eid.endsWith("/" + emk) || eid === emk) {
+            efiles = m[emk];
+            break;
+          }
+        }
+      }
+      if (efiles) {
+        for (var efi = 0; efi < efiles.length; efi++) {
+          var ef = efiles[efi];
+          if (ef.charAt(0) === '/') ef = ef.slice(1);
+          if (ef.endsWith(".js")) eagerFiles.add(ef);
+        }
+      }
+    }
+  }
 
   // Inject the client entry script if embedded by vinext:cloudflare-build
   if (typeof globalThis !== "undefined" && globalThis.__VINEXT_CLIENT_ENTRY__) {
@@ -528,9 +557,14 @@ function collectAssetTags(manifest, moduleIds) {
       } else if (tf.endsWith(".js")) {
         // Skip lazy chunks — they are behind dynamic import() boundaries
         // (React.lazy, next/dynamic) and should only be fetched on demand.
-        if (lazySet && lazySet.has(tf)) continue;
+        // Exception: eagerFiles bypasses this filter (used for _app and current page).
+        if (lazySet && lazySet.has(tf) && !(eagerFiles && eagerFiles.has(tf))) continue;
+        // Only emit <link rel="modulepreload"> — not a <script> tag. The client
+        // entry script (injected separately via __VINEXT_CLIENT_ENTRY__) is the
+        // sole entry point that triggers execution. All other chunks are imported
+        // transitively; emitting extra <script> tags for them would cause duplicate
+        // module evaluation and side-effect re-runs.
         tags.push('<link rel="modulepreload" href="/' + tf + '" />');
-        tags.push('<script type="module" src="/' + tf + '" crossorigin></script>');
       }
     }
   }
@@ -987,14 +1021,25 @@ async function _renderPage(request, url, manifest) {
                 }
                 // Re-render the page with fresh props inside fresh render sub-scopes
                 // so head/cache state cannot leak across passes.
+                var _regenAppProps = {};
+                if (AppComponent && typeof AppComponent.getInitialProps === "function") {
+                  try {
+                    _regenAppProps = await AppComponent.getInitialProps({
+                      Component: PageComponent,
+                      AppTree: AppComponent,
+                      router: { pathname: patternToNextFormat(route.pattern), query: { ...params, ...parseQuery(routeUrl) }, asPath: routeUrl },
+                      ctx: { pathname: patternToNextFormat(route.pattern), query: { ...params, ...parseQuery(routeUrl) }, asPath: routeUrl },
+                    });
+                  } catch(e) { /* ignore getInitialProps errors during regen */ }
+                }
                 var _el = AppComponent
-                  ? React.createElement(AppComponent, { Component: PageComponent, pageProps: _fp, ..._appProps })
+                  ? React.createElement(AppComponent, { Component: PageComponent, pageProps: _fp, ..._regenAppProps })
                   : React.createElement(PageComponent, _fp);
                 _el = wrapWithRouterContext(_el);
                 var _freshBody = await renderIsrPassToStringAsync(_el);
                 // Rebuild __NEXT_DATA__ with fresh props
                 var _regenPayload = {
-                  props: { pageProps: _fp }, page: patternToNextFormat(route.pattern),
+                  props: { pageProps: _fp, ..._regenAppProps }, page: patternToNextFormat(route.pattern),
                   query: params, buildId: buildId, isFallback: false,
                 };
                 if (i18nConfig) {
@@ -1105,7 +1150,8 @@ async function _renderPage(request, url, manifest) {
     } catch (e) { /* font styles not available */ }
 
     const pageModuleIds = route.filePath ? [route.filePath] : [];
-    const assetTags = collectAssetTags(manifest, pageModuleIds);
+    ${appFilePath !== null ? `pageModuleIds.push(${JSON.stringify(appFilePath.replace(/\\/g, "/"))});` : ""}
+    const assetTags = collectAssetTags(manifest, pageModuleIds, pageModuleIds);
     const nextDataPayload = {
       props: { pageProps, ..._appProps }, page: patternToNextFormat(route.pattern), query: params, buildId, isFallback: false,
     };

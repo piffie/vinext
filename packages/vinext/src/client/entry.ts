@@ -23,8 +23,8 @@ const { pageProps = {}, ...appInitialProps } = (nextData?.props ?? {}) as Record
   string,
   unknown
 > & { pageProps?: Record<string, unknown> };
-const pageModulePath = nextData?.__pageModule;
-const appModulePath = nextData?.__appModule;
+const pageModulePath = nextData?.__vinext?.pageModuleUrl ?? nextData?.__pageModule;
+const appModulePath = nextData?.__vinext?.appModuleUrl ?? nextData?.__appModule;
 
 async function hydrate() {
   if (!isValidModulePath(pageModulePath)) {

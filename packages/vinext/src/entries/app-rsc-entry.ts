@@ -2339,7 +2339,10 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
             await _runWithUnifiedCtx(__revalUCtx, async () => {
               _ensureFetchPatch();
               setNavigationContext({ pathname: cleanPathname, searchParams: __revalSearchParams, params: __revalParams });
-              const __syntheticReq = new Request(__revalUrl, { method: "GET" });
+              const __syntheticReq = __proxyRouteRequest(
+                new Request(__revalUrl, { method: "GET" }),
+                markDynamicUsage,
+              );
               const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
               const __regenDynamic = consumeDynamicUsage();
               setNavigationContext(null);

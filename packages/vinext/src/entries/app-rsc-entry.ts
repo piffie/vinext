@@ -2392,6 +2392,10 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // nextUrl.searchParams). This triggers markDynamicUsage() so the ISR
       // cache write path knows to skip caching for this handler.
       const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
+      // Clear any dynamic usage flags set by earlier pipeline stages
+      // (middleware, headers context setup) so we only detect dynamic
+      // usage from the handler itself.
+      consumeDynamicUsage();
       try {
         const response = await handlerFn(__proxiedRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();

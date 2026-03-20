@@ -2256,8 +2256,15 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
 
     // Include query string in route handler ISR cache key so different
-    // query parameters produce distinct cache entries.
-    const __routeQs = (method === "GET" || isAutoHead) ? new URL(request.url).search : "";
+    // query parameters produce distinct cache entries. Parameters are
+    // sorted to normalize key order (?a=1&b=2 and ?b=2&a=1 produce the
+    // same key) and prevent cache-busting via parameter reordering.
+    let __routeQs = "";
+    if (method === "GET" || isAutoHead) {
+      const __qs = new URLSearchParams(url.searchParams);
+      __qs.sort();
+      if (__qs.size) __routeQs = "?" + __qs.toString();
+    }
 
     // ISR cache read for route handlers (production only).
     // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.

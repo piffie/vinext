@@ -3816,7 +3816,7 @@ describe("generateRscEntry ISR code generation", () => {
     const code = generateRscEntry("/tmp/test/app", minimalRoutes);
     expect(code).toContain('"APP_ROUTE"');
     // Route handler ISR uses __isrRouteKey to build the cache key, then reads via __isrGet
-    expect(code).toContain("__isrRouteKey(cleanPathname)");
+    expect(code).toContain("__isrRouteKey(cleanPathname + __routeQs)");
     expect(code).toContain("__isrGet(__routeKey)");
   });
 

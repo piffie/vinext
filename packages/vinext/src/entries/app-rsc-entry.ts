@@ -2255,6 +2255,10 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isAutoHead = true;
     }
 
+    // Include query string in route handler ISR cache key so different
+    // query parameters produce distinct cache entries.
+    const __routeQs = (method === "GET" || isAutoHead) ? new URL(request.url).search : "";
+
     // ISR cache read for route handlers (production only).
     // Only GET/HEAD (auto-HEAD) with finite revalidate > 0 are ISR-eligible.
     // This runs before handler execution so a cache HIT skips the handler entirely.
@@ -2265,7 +2269,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       (method === "GET" || isAutoHead) &&
       typeof handlerFn === "function"
     ) {
-      const __routeKey = __isrRouteKey(cleanPathname);
+      const __routeKey = __isrRouteKey(cleanPathname + __routeQs);
       try {
         const __cached = await __isrGet(__routeKey);
         if (__cached && !__cached.isStale && __cached.value.value && __cached.value.value.kind === "APP_ROUTE") {
@@ -2366,7 +2370,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         ) {
           response.headers.set("X-Vinext-Cache", "MISS");
           const __routeClone = response.clone();
-          const __routeKey = __isrRouteKey(cleanPathname);
+          const __routeKey = __isrRouteKey(cleanPathname + __routeQs);
           const __revalSecs = revalidateSeconds;
           const __routeTags = __pageCacheTags(cleanPathname, getCollectedFetchTags());
           const __routeWritePromise = (async () => {

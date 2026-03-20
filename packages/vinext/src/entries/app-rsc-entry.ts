@@ -2385,7 +2385,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
       const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
       try {
-        const response = await handlerFn(__proxiedRequest, { params });
+        const response = await handlerFn(request, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();
         const handlerSetCacheControl = response.headers.has("cache-control");
 

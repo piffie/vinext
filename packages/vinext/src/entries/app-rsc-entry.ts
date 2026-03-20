@@ -2351,6 +2351,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
                 new Request(__revalUrl, { method: "GET" }),
                 markDynamicUsage,
               );
+              // Clear dynamic usage from regen pipeline setup before running handler
+              consumeDynamicUsage();
               const __revalResponse = await __revalHandlerFn(__syntheticReq, { params: __revalParams });
               const __regenDynamic = consumeDynamicUsage();
               setNavigationContext(null);

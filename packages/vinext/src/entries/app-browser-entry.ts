@@ -121,6 +121,10 @@ setServerCallback(async (id, args) => {
   // Check for redirect signal from server action that called redirect()
   const actionRedirect = fetchResponse.headers.get("x-action-redirect");
   if (actionRedirect) {
+    // Block dangerous URI schemes (javascript:, data:, vbscript:)
+    if (/^[\\s\\u200B\\uFEFF]*(javascript|data|vbscript)\\s*:/i.test(actionRedirect)) {
+      return undefined;
+    }
     // External URLs (different origin) need a hard redirect — client-side
     // RSC navigation only works for same-origin paths.
     try {

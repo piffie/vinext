@@ -12,6 +12,7 @@
 // bindings are just `undefined` on the namespace object and we can guard at runtime.
 import * as React from "react";
 import { toBrowserNavigationHref, toSameOriginAppPath } from "./url-utils.js";
+import { isDangerousScheme } from "./url-safety.js";
 import { stripBasePath } from "../utils/base-path.js";
 import { ReadonlyURLSearchParams } from "./readonly-url-search-params.js";
 
@@ -520,6 +521,8 @@ async function navigateImpl(
   mode: "push" | "replace",
   scroll: boolean,
 ): Promise<void> {
+  if (isDangerousScheme(href)) return;
+
   // Normalize same-origin absolute URLs to local paths for SPA navigation
   let normalizedHref = href;
   if (isExternalUrl(href)) {

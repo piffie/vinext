@@ -18,6 +18,7 @@ import {
   type UrlQuery,
   urlQueryToSearchParams,
 } from "../utils/query.js";
+import { isDangerousScheme } from "./url-safety.js";
 
 /** basePath from next.config.js, injected by the plugin at build time */
 const __basePath: string = process.env.__NEXT_ROUTER_BASEPATH ?? "";
@@ -528,6 +529,8 @@ export function useRouter(): NextRouter {
     async (url: string | UrlObject, as?: string, options?: TransitionOptions): Promise<boolean> => {
       let resolved = resolveNavigationTarget(url, as, options?.locale);
 
+      if (isDangerousScheme(resolved)) return false;
+
       // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
         const localPath = toSameOriginAppPath(resolved, __basePath);
@@ -585,6 +588,8 @@ export function useRouter(): NextRouter {
   const replace = useCallback(
     async (url: string | UrlObject, as?: string, options?: TransitionOptions): Promise<boolean> => {
       let resolved = resolveNavigationTarget(url, as, options?.locale);
+
+      if (isDangerousScheme(resolved)) return false;
 
       // External URLs — delegate to browser (unless same-origin)
       if (isExternalUrl(resolved)) {
@@ -767,6 +772,8 @@ const Router = {
   push: async (url: string | UrlObject, as?: string, options?: TransitionOptions) => {
     let resolved = resolveNavigationTarget(url, as, options?.locale);
 
+    if (isDangerousScheme(resolved)) return false;
+
     // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {
       const localPath = toSameOriginAppPath(resolved, __basePath);
@@ -817,6 +824,8 @@ const Router = {
   },
   replace: async (url: string | UrlObject, as?: string, options?: TransitionOptions) => {
     let resolved = resolveNavigationTarget(url, as, options?.locale);
+
+    if (isDangerousScheme(resolved)) return false;
 
     // External URLs (unless same-origin)
     if (isExternalUrl(resolved)) {

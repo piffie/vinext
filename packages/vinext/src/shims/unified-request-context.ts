@@ -81,7 +81,7 @@ function _getInheritedExecutionContext(): ExecutionContextLike | null {
 export function createRequestContext(opts?: Partial<UnifiedRequestContext>): UnifiedRequestContext {
   return {
     headersContext: null,
-    dynamicUsageDetected: false,
+    dynamicUsageCount: 0,
     pendingSetCookies: [],
     draftModeCookieHeader: null,
     phase: "render",

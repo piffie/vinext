@@ -976,7 +976,7 @@ export async function prerenderApp({
       try {
         // Invoke RSC handler directly with a synthetic Request.
         // Each request is wrapped in its own ALS context via runWithHeadersContext
-        // so per-request state (dynamicUsageDetected, headersContext, etc.) is
+        // so per-request state (dynamicUsageCount, headersContext, etc.) is
         // isolated and never bleeds into other renders or into _fallbackState.
         //
         // NOTE: for Cloudflare Workers builds `rscHandler` is a thin HTTP proxy

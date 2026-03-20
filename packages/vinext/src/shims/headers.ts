@@ -34,7 +34,7 @@ export type HeadersAccessPhase = "render" | "action" | "route-handler";
 
 export type VinextHeadersShimState = {
   headersContext: HeadersContext | null;
-  dynamicUsageDetected: boolean;
+  dynamicUsageCount: number;
   pendingSetCookies: string[];
   draftModeCookieHeader: string | null;
   phase: HeadersAccessPhase;
@@ -55,7 +55,7 @@ const _als = (_g[_ALS_KEY] ??=
 
 const _fallbackState = (_g[_FALLBACK_KEY] ??= {
   headersContext: null,
-  dynamicUsageDetected: false,
+  dynamicUsageCount: 0,
   pendingSetCookies: [],
   draftModeCookieHeader: null,
   phase: "render",
@@ -81,7 +81,11 @@ function _getState(): VinextHeadersShimState {
  * Called by connection(), cookies(), headers(), and noStore().
  */
 export function markDynamicUsage(): void {
-  _getState().dynamicUsageDetected = true;
+  _getState().dynamicUsageCount++;
+}
+
+export function getDynamicUsageCount(): number {
+  return _getState().dynamicUsageCount;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,8 +141,8 @@ export function throwIfInsideCacheScope(apiName: string): void {
  */
 export function consumeDynamicUsage(): boolean {
   const state = _getState();
-  const used = state.dynamicUsageDetected;
-  state.dynamicUsageDetected = false;
+  const used = state.dynamicUsageCount > 0;
+  state.dynamicUsageCount = 0;
   return used;
 }
 
@@ -182,7 +186,7 @@ export function setHeadersContext(ctx: HeadersContext | null): void {
   const state = _getState();
   if (ctx !== null) {
     state.headersContext = ctx;
-    state.dynamicUsageDetected = false;
+    state.dynamicUsageCount = 0;
     state.pendingSetCookies = [];
     state.draftModeCookieHeader = null;
     state.phase = "render";
@@ -209,7 +213,7 @@ export function runWithHeadersContext<T>(
   if (isInsideUnifiedScope()) {
     return runWithUnifiedStateMutation((uCtx) => {
       uCtx.headersContext = ctx;
-      uCtx.dynamicUsageDetected = false;
+      uCtx.dynamicUsageCount = 0;
       uCtx.pendingSetCookies = [];
       uCtx.draftModeCookieHeader = null;
       uCtx.phase = "render";
@@ -218,7 +222,7 @@ export function runWithHeadersContext<T>(
 
   const state: VinextHeadersShimState = {
     headersContext: ctx,
-    dynamicUsageDetected: false,
+    dynamicUsageCount: 0,
     pendingSetCookies: [],
     draftModeCookieHeader: null,
     phase: "render",

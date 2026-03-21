@@ -133,6 +133,7 @@ function registerServerActionCallback(): void {
 
     const actionRedirect = fetchResponse.headers.get("x-action-redirect");
     if (actionRedirect) {
+      // Check for external URLs that need a hard redirect.
       try {
         const redirectUrl = new URL(actionRedirect, window.location.origin);
         if (redirectUrl.origin !== window.location.origin) {
@@ -143,17 +144,16 @@ function registerServerActionCallback(): void {
         // Fall through to client-side navigation if URL parsing fails.
       }
 
+      // Use hard redirect for all action redirects because vinext's server
+      // currently returns an empty body for redirect responses. RSC navigation
+      // requires a valid RSC payload. This is a known parity gap with Next.js,
+      // which pre-renders the redirect target's RSC payload.
       const redirectType = fetchResponse.headers.get("x-action-redirect-type") ?? "replace";
       if (redirectType === "push") {
-        window.history.pushState(null, "", actionRedirect);
+        window.location.assign(actionRedirect);
       } else {
-        window.history.replaceState(null, "", actionRedirect);
+        window.location.replace(actionRedirect);
       }
-
-      if (typeof window.__VINEXT_RSC_NAVIGATE__ === "function") {
-        await window.__VINEXT_RSC_NAVIGATE__(actionRedirect);
-      }
-
       return undefined;
     }
 

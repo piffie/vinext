@@ -2372,16 +2372,17 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
 
     if (typeof handlerFn === "function") {
       const previousHeadersPhase = setHeadersAccessPhase("route-handler");
-      const __proxiedRequest = __proxyRouteRequest(request, markDynamicUsage);
-      // Clear dynamic usage accumulated by pipeline stages (middleware,
-      // headers context setup) so we only detect the handler's own usage.
-      consumeDynamicUsage();
+      let __handlerAccessedDynamicApi = false;
+      const __proxiedRequest = __proxyRouteRequest(request, () => { __handlerAccessedDynamicApi = true; markDynamicUsage(); });
       try {
         const response = await handlerFn(__proxiedRequest, { params });
         const dynamicUsedInHandler = consumeDynamicUsage();
         const handlerSetCacheControl = response.headers.has("cache-control");
 
-        if (dynamicUsedInHandler) {
+        // Only add to the dynamic set if the handler actually accessed
+        // the proxied request's dynamic APIs (headers, searchParams),
+        // not if pipeline stages called markDynamicUsage() via shims.
+        if (__handlerAccessedDynamicApi) {
           __dynamicRouteHandlers.add(handler.pattern);
         }
 

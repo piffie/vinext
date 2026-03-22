@@ -34,7 +34,7 @@ If you're using the App Router, also install:
 npm install -D @vitejs/plugin-rsc react-server-dom-webpack
 ```
 
-Add parallel vinext scripts while you validate the migration:
+`vinext init` adds side-by-side vinext scripts instead of overwriting your existing Next.js commands. If you're migrating manually, mirror that flow first:
 
 ```json
 {
@@ -51,6 +51,8 @@ npm run dev:vinext  # Development server with HMR
 npm run build:vinext
 vinext deploy       # Build and deploy to Cloudflare Workers
 ```
+
+Once the vinext path looks good, you can swap your default `dev` / `build` scripts over if you want vinext to take over completely.
 
 vinext auto-detects your `app/` or `pages/` directory, loads `next.config.js`, and configures Vite automatically. No `vite.config.ts` required for basic usage.
 
@@ -391,7 +393,7 @@ See the [Nitro deployment docs](https://v3.nitro.build/deploy) for the full list
 
 ## Live examples
 
-These are deployed to Cloudflare Workers and updated on every push to `main`:
+Most of these are deployed to Cloudflare Workers and updated on every push to `main`. The Nitro example is kept here as a checked-in multi-platform deployment reference:
 
 | Example                | Description                                                                                                      | URL                                                                                              |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -402,8 +404,9 @@ These are deployed to Cloudflare Workers and updated on every push to `main`:
 | Pages Router (minimal) | Minimal Pages Router on Workers                                                                                  | [pages-router-cloudflare.vinext.workers.dev](https://pages-router-cloudflare.vinext.workers.dev) |
 | RealWorld API          | REST API routes example                                                                                          | [realworld-api-rest.vinext.workers.dev](https://realworld-api-rest.vinext.workers.dev)           |
 | Benchmarks Dashboard   | Build performance tracking over time (D1-backed)                                                                 | [benchmarks.vinext.workers.dev](https://benchmarks.vinext.workers.dev)                           |
+| App Router + Nitro     | App Router deployed via Nitro (multi-platform)                                                                   | [examples/app-router-nitro](/Users/steve/.codex/worktrees/8805/vinext/examples/app-router-nitro) |
 
-Additional checked-in examples that are not part of the auto-deploy matrix live under [`examples/`](/Users/steve/.codex/worktrees/8805/vinext/examples), including `app-router-nitro`, `fumadocs-docs-template`, and `tpr-demo`.
+Additional checked-in examples that are not part of the auto-deploy matrix live under [`examples/`](/Users/steve/.codex/worktrees/8805/vinext/examples), including `fumadocs-docs-template` and `tpr-demo`.
 
 ## API coverage
 

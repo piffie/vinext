@@ -70,11 +70,11 @@ npm install -D vite@^8 @vitejs/plugin-react
 npm install -D @vitejs/plugin-rsc react-server-dom-webpack
 ```
 
-Keep `next` installed until you've validated the vinext path. The recommended migration flow is additive first, cleanup second.
+Keep `next` installed until you've validated the vinext path. This mirrors `vinext init`, which adds vinext scripts without overwriting the existing Next.js ones.
 
 ### 3b. Add or update scripts
 
-Prefer parallel vinext scripts first so you can compare both runtimes side by side:
+Mirror `vinext init`: add parallel vinext scripts first so you can validate the vinext path without losing the existing Next.js commands:
 
 | Script         | Command                | Notes                                 |
 | -------------- | ---------------------- | ------------------------------------- |

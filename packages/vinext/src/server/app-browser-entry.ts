@@ -331,13 +331,35 @@ async function main(): Promise<void> {
         setClientParams({});
       }
 
-      const rscPayload = await createFromFetch(Promise.resolve(navResponse));
-      // Await the transition commit so that this function only resolves once
-      // the new content is actually painted. __VINEXT_RSC_PENDING__ (set by
-      // the popstate handler to this promise) is what restoreScrollPosition
-      // waits on before applying saved scroll — resolving too early would
-      // cause scroll to be set on the old (outgoing) content with the wrong
-      // layout, producing the back-button jank described in issue #639.
+      // Buffer the full RSC response body before passing it to createFromFetch.
+      //
+      // Without buffering, createFromFetch receives a streaming response and
+      // creates React elements with "lazy" chunks for async server components.
+      // When React renders these, Suspense boundaries suspend and React commits
+      // the fallback first (short content), then the resolved content in a
+      // second pass. This causes two problems:
+      //   1. Suspense fallback flash — the fallback is briefly visible between
+      //      the shell commit and the resolved-content commit.
+      //   2. Scroll restoration jank — restoreScrollPosition sees a page that
+      //      is too short to reach the saved scroll position on the first attempt.
+      //
+      // By fully buffering the response, all RSC rows are available before the
+      // flight parser runs. createFromFetch returns a fully-resolved React tree
+      // with no lazy chunks. React renders and commits the complete content in
+      // a single pass — no Suspense suspension, no partial commits, no flash.
+      //
+      // The tradeoff: the old content stays visible for the full server response
+      // time (e.g. 400ms for a slow async component). This matches Next.js App
+      // Router's "keep old UI visible until new content is ready" contract.
+      const responseBody = await navResponse.arrayBuffer();
+      const bufferedResponse = new Response(responseBody, {
+        headers: navResponse.headers,
+        status: navResponse.status,
+        statusText: navResponse.statusText,
+      });
+      const rscPayload = await createFromFetch(Promise.resolve(bufferedResponse));
+      // Await the transition commit so __VINEXT_RSC_PENDING__ resolves only
+      // after the new content is painted (needed for scroll restoration).
       if (_scheduleRscUpdate) {
         await _scheduleRscUpdate(rscPayload as ReactNode);
       } else {

@@ -235,3 +235,89 @@ test.describe("App Router navigation flows", () => {
     await expect(page.locator('[data-testid="client-search-q"]')).toHaveText("test-param");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression tests for issue #639: Suspense partial-flash during navigation
+//
+// The bug: flushSync() caused React to synchronously commit a partial new tree
+// where content *outside* a Suspense boundary (e.g. a heading) had updated to
+// the new value but content *inside* the Suspense boundary was still showing
+// its fallback. This "partial flash" made it look like the heading was wrong.
+//
+// The fix: NavigationRoot holds RSC content in React state and uses
+// startTransition to schedule updates. React's transition semantics keep the
+// *entire* previous committed tree visible until all Suspense boundaries in the
+// new tree have resolved, then commits atomically.
+//
+// We test this with /suspense-nav-test: a page where the heading is *outside*
+// Suspense but the list is *inside* Suspense. Both depend on the same ?filter
+// param. A partial flash would produce heading="All Items" + list fallback at
+// the same time. The correct behavior is: old heading stays until list is ready,
+// then both update together.
+// ---------------------------------------------------------------------------
+test.describe("issue #639 — Suspense partial-flash regression", () => {
+  test("heading and list update together during same-page navigation", async ({ page }) => {
+    // Start with filter applied so Suspense has resolved content.
+    await page.goto(`${BASE}/suspense-nav-test?filter=active`);
+    await waitForHydration(page);
+
+    await expect(page.locator("#page-heading")).toHaveText("Filtered: active");
+    await expect(page.locator("#item-list")).toBeVisible();
+
+    // Instrument: record if we ever observe the NEW heading ("All Items") at
+    // the same moment as the list loading fallback — that is the partial flash.
+    await page.evaluate(() => {
+      (window as any).__PARTIAL_FLASH_SEEN__ = false;
+      const observer = new MutationObserver(() => {
+        const heading = document.getElementById("page-heading");
+        const loadingFallback = document.getElementById("list-loading");
+        // Partial flash: new heading visible while list is still loading
+        if (heading?.textContent === "All Items" && loadingFallback) {
+          (window as any).__PARTIAL_FLASH_SEEN__ = true;
+        }
+      });
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      (window as any).__PARTIAL_FLASH_OBSERVER__ = observer;
+    });
+
+    // Navigate back to the unfiltered state (clears the filter).
+    await page.click("#toggle-filter");
+
+    // Wait for the full transition to complete.
+    await expect(page.locator("#page-heading")).toHaveText("All Items", { timeout: 10_000 });
+    await expect(page.locator("#item-list")).toBeVisible();
+
+    await page.evaluate(() => {
+      (window as any).__PARTIAL_FLASH_OBSERVER__?.disconnect();
+    });
+
+    const partialFlashSeen = await page.evaluate(() => (window as any).__PARTIAL_FLASH_SEEN__);
+    expect(partialFlashSeen).toBe(false);
+  });
+
+  test("back/forward navigation completes correctly on suspense page", async ({ page }) => {
+    await page.goto(`${BASE}/suspense-nav-test`);
+    await waitForHydration(page);
+    await expect(page.locator("#page-heading")).toHaveText("All Items");
+
+    // Navigate to filtered state
+    await page.click("#toggle-filter");
+    await expect(page.locator("#page-heading")).toHaveText("Filtered: active", {
+      timeout: 10_000,
+    });
+
+    // Navigate back
+    await page.goBack();
+    await expect(page.locator("#page-heading")).toHaveText("All Items", { timeout: 10_000 });
+
+    // Navigate forward
+    await page.goForward();
+    await expect(page.locator("#page-heading")).toHaveText("Filtered: active", {
+      timeout: 10_000,
+    });
+  });
+});

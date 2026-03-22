@@ -9,7 +9,7 @@ import {
   encodeReply,
   setServerCallback,
 } from "@vitejs/plugin-rsc/browser";
-import { flushSync } from "react-dom";
+import { createElement, Fragment, startTransition, useState } from "react";
 import { hydrateRoot } from "react-dom/client";
 import {
   PREFETCH_CACHE_TTL,
@@ -120,6 +120,42 @@ async function readInitialRscStream(): Promise<ReadableStream<Uint8Array>> {
   return rscResponse.body;
 }
 
+// ---------------------------------------------------------------------------
+// NavigationRoot — persistent wrapper for concurrent RSC navigation
+//
+// startTransition(() => root.render(newTree)) does NOT correctly prevent
+// Suspense fallbacks from flashing during navigation. When root.render()
+// replaces the entire fiber tree, React has no "previously committed content"
+// to hold onto — new Suspense boundaries in the incoming tree may flash their
+// fallbacks before their content resolves.
+//
+// The correct fix: hold RSC content in React state inside a persistent
+// component. startTransition(() => setState(newContent)) inside a persistent
+// component tells React to keep that component's current committed output
+// visible until the new render (including all Suspense boundaries) is fully
+// resolved, then commit atomically. This is how Next.js App Router prevents
+// loading-boundary flashes during client navigation.
+// ---------------------------------------------------------------------------
+
+// Stable setter assigned by NavigationRoot on its first render.
+// React guarantees that the setState dispatcher returned by useState is stable,
+// so this closure is effectively constant for the lifetime of the page.
+let _scheduleRscUpdate: ((content: ReactNode) => void) | null = null;
+
+function NavigationRoot({ initial }: { initial: ReactNode }) {
+  const [content, setContent] = useState<ReactNode>(initial);
+
+  _scheduleRscUpdate = (newContent: ReactNode) => {
+    startTransition(() => {
+      setContent(newContent);
+    });
+  };
+
+  // Fragment wrapper: renders content directly with no extra DOM nodes so
+  // the hydration output is identical to the server-rendered HTML.
+  return createElement(Fragment, null, content);
+}
+
 function registerServerActionCallback(): void {
   setServerCallback(async (id, args) => {
     const temporaryReferences = createTemporaryReferenceSet();
@@ -162,7 +198,13 @@ function registerServerActionCallback(): void {
     });
 
     if (isServerActionResult(result)) {
-      getReactRoot().render(result.root);
+      // Route through NavigationRoot so root.render() doesn't destroy the wrapper.
+      // Server action results are fully resolved so startTransition commits promptly.
+      if (_scheduleRscUpdate) {
+        _scheduleRscUpdate(result.root);
+      } else {
+        getReactRoot().render(result.root);
+      }
       if (result.returnValue) {
         if (!result.returnValue.ok) throw result.returnValue.data;
         return result.returnValue.data;
@@ -170,7 +212,11 @@ function registerServerActionCallback(): void {
       return undefined;
     }
 
-    getReactRoot().render(result as ReactNode);
+    if (_scheduleRscUpdate) {
+      _scheduleRscUpdate(result as ReactNode);
+    } else {
+      getReactRoot().render(result as ReactNode);
+    }
     return result;
   });
 }
@@ -181,9 +227,12 @@ async function main(): Promise<void> {
   const rscStream = await readInitialRscStream();
   const root = await createFromReadableStream(rscStream);
 
+  // Hydrate with NavigationRoot so subsequent navigations go through setState
+  // transitions rather than root.render() replacements. NavigationRoot's
+  // Fragment wrapper renders identical DOM to the SSR HTML — no hydration mismatch.
   reactRoot = hydrateRoot(
     document,
-    root as ReactNode,
+    createElement(NavigationRoot, { initial: root as ReactNode }),
     import.meta.env.DEV ? { onCaughtError() {} } : undefined,
   );
 
@@ -252,9 +301,17 @@ async function main(): Promise<void> {
       }
 
       const rscPayload = await createFromFetch(Promise.resolve(navResponse));
-      flushSync(() => {
-        getReactRoot().render(rscPayload as ReactNode);
-      });
+      // Route update through NavigationRoot's setState so React treats this
+      // as a concurrent transition: old UI stays visible until all Suspense
+      // boundaries in the new RSC tree resolve, then commits atomically.
+      if (_scheduleRscUpdate) {
+        _scheduleRscUpdate(rscPayload as ReactNode);
+      } else {
+        // Fallback: shouldn't occur after hydration completes.
+        startTransition(() => {
+          getReactRoot().render(rscPayload as ReactNode);
+        });
+      }
     } catch (error) {
       console.error("[vinext] RSC navigation error:", error);
       window.location.href = href;
@@ -278,6 +335,7 @@ async function main(): Promise<void> {
         const rscPayload = await createFromFetch(
           fetch(toRscUrl(window.location.pathname + window.location.search)),
         );
+        // HMR bypasses NavigationRoot for immediate code-change feedback.
         getReactRoot().render(rscPayload as ReactNode);
       } catch (error) {
         console.error("[vinext] RSC HMR error:", error);

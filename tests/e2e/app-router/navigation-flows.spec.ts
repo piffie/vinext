@@ -320,4 +320,50 @@ test.describe("issue #639 — Suspense partial-flash regression", () => {
       timeout: 10_000,
     });
   });
+
+  /**
+   * Regression test for issue #639 — back-button scroll restoration jank.
+   *
+   * The bug: flushSync committed an incomplete tree (with Suspense fallbacks)
+   * before scroll restoration ran. Because fallbacks have different heights
+   * than resolved content, the restored scroll position landed in the wrong
+   * place, then jumped again when content resolved — visible stutter.
+   *
+   * The fix (NavigationRoot): the old content stays visible during the
+   * transition, so scroll is set on stable layout. The new content then
+   * commits at that scroll position. No layout shift, no stutter.
+   */
+  test("back-button restores scroll position after navigating to item detail", async ({ page }) => {
+    await page.goto(`${BASE}/suspense-nav-test`);
+    await waitForHydration(page);
+
+    // Wait for list to load (async, 400ms delay)
+    await expect(page.locator("#item-list")).toBeVisible({ timeout: 10_000 });
+
+    // Scroll well down the list so there is a meaningful position to restore.
+    await page.evaluate(() => window.scrollTo(0, 600));
+    const scrollBefore = await page.evaluate(() => window.scrollY);
+    expect(scrollBefore).toBeGreaterThan(0);
+
+    // Navigate via evaluate click (no Playwright auto-scroll).
+    await page.evaluate(() => {
+      const link = document.querySelector("#item-list a:first-child") as HTMLAnchorElement;
+      link?.click();
+    });
+    await expect(page.locator("#item-heading")).toBeVisible({ timeout: 10_000 });
+
+    // Press back.
+    await page.goBack();
+    await expect(page.locator("#item-list")).toBeVisible({ timeout: 10_000 });
+
+    // Allow time for the retry-based scroll restoration to succeed.
+    // The list has a 400ms load delay; restoration retries until the page
+    // is tall enough to reach the target position.
+    await page.waitForTimeout(800);
+
+    const scrollAfter = await page.evaluate(() => window.scrollY);
+
+    // Scroll should be close to where we left off (within 50px tolerance).
+    expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(50);
+  });
 });

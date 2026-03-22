@@ -9,7 +9,15 @@ import {
   encodeReply,
   setServerCallback,
 } from "@vitejs/plugin-rsc/browser";
-import { createElement, Fragment, startTransition, useState } from "react";
+import {
+  createElement,
+  Fragment,
+  startTransition,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import { hydrateRoot } from "react-dom/client";
 import {
   PREFETCH_CACHE_TTL,
@@ -137,17 +145,40 @@ async function readInitialRscStream(): Promise<ReadableStream<Uint8Array>> {
 // loading-boundary flashes during client navigation.
 // ---------------------------------------------------------------------------
 
-// Stable setter assigned by NavigationRoot on its first render.
-// React guarantees that the setState dispatcher returned by useState is stable,
-// so this closure is effectively constant for the lifetime of the page.
-let _scheduleRscUpdate: ((content: ReactNode) => void) | null = null;
+// Exposed by NavigationRoot. Returns a Promise that resolves once the
+// transition commits to the DOM — callers can await it to know when the
+// new content is actually visible (used by navigateRsc so that
+// __VINEXT_RSC_PENDING__ resolves at the right time for scroll restoration).
+let _scheduleRscUpdate: ((content: ReactNode) => Promise<void>) | null = null;
 
 function NavigationRoot({ initial }: { initial: ReactNode }) {
   const [content, setContent] = useState<ReactNode>(initial);
+  // useTransition gives us isPending so we know exactly when a transition
+  // has committed. We use that to resolve the promise returned to navigateRsc,
+  // which in turn lets __VINEXT_RSC_PENDING__ resolve at the right moment for
+  // scroll restoration (restoreScrollPosition in navigation.ts awaits it).
+  const [isPending, startTransitionHook] = useTransition();
+  const resolveRef = useRef<(() => void) | null>(null);
 
-  _scheduleRscUpdate = (newContent: ReactNode) => {
-    startTransition(() => {
-      setContent(newContent);
+  // After each commit: if a transition just completed, resolve the waiter.
+  // useEffect runs after the browser has painted the committed tree, which
+  // is the correct point for scroll restoration to apply.
+  useEffect(() => {
+    if (!isPending && resolveRef.current) {
+      const resolve = resolveRef.current;
+      resolveRef.current = null;
+      resolve();
+    }
+  });
+
+  _scheduleRscUpdate = (newContent: ReactNode): Promise<void> => {
+    return new Promise<void>((resolve) => {
+      // Overwrite any prior pending resolve — if a second navigation fires
+      // before the first commits, the first waiter is abandoned (acceptable).
+      resolveRef.current = resolve;
+      startTransitionHook(() => {
+        setContent(newContent);
+      });
     });
   };
 
@@ -201,7 +232,7 @@ function registerServerActionCallback(): void {
       // Route through NavigationRoot so root.render() doesn't destroy the wrapper.
       // Server action results are fully resolved so startTransition commits promptly.
       if (_scheduleRscUpdate) {
-        _scheduleRscUpdate(result.root);
+        void _scheduleRscUpdate(result.root);
       } else {
         getReactRoot().render(result.root);
       }
@@ -213,7 +244,7 @@ function registerServerActionCallback(): void {
     }
 
     if (_scheduleRscUpdate) {
-      _scheduleRscUpdate(result as ReactNode);
+      void _scheduleRscUpdate(result as ReactNode);
     } else {
       getReactRoot().render(result as ReactNode);
     }
@@ -301,11 +332,14 @@ async function main(): Promise<void> {
       }
 
       const rscPayload = await createFromFetch(Promise.resolve(navResponse));
-      // Route update through NavigationRoot's setState so React treats this
-      // as a concurrent transition: old UI stays visible until all Suspense
-      // boundaries in the new RSC tree resolve, then commits atomically.
+      // Await the transition commit so that this function only resolves once
+      // the new content is actually painted. __VINEXT_RSC_PENDING__ (set by
+      // the popstate handler to this promise) is what restoreScrollPosition
+      // waits on before applying saved scroll — resolving too early would
+      // cause scroll to be set on the old (outgoing) content with the wrong
+      // layout, producing the back-button jank described in issue #639.
       if (_scheduleRscUpdate) {
-        _scheduleRscUpdate(rscPayload as ReactNode);
+        await _scheduleRscUpdate(rscPayload as ReactNode);
       } else {
         // Fallback: shouldn't occur after hydration completes.
         startTransition(() => {

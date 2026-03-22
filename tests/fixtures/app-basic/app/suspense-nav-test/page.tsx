@@ -1,20 +1,22 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import { FilterToggle } from "./FilterToggle";
+
+const ALL_ITEMS = Array.from({ length: 20 }, (_, i) => ({
+  id: i + 1,
+  text: `Item ${String.fromCharCode(65 + i)}`, // Item A … Item T
+}));
 
 async function ItemList({ filter }: { filter: string }) {
   // Artificial delay: long enough for Playwright to catch intermediate state.
   await new Promise((r) => setTimeout(r, 400));
-  const items = filter
-    ? [{ id: 1, text: `Filtered: ${filter}` }]
-    : [
-        { id: 1, text: "Item A" },
-        { id: 2, text: "Item B" },
-        { id: 3, text: "Item C" },
-      ];
+  const items = filter ? [{ id: 1, text: `Filtered: ${filter}` }] : ALL_ITEMS;
   return (
     <ul id="item-list">
       {items.map((i) => (
-        <li key={i.id}>{i.text}</li>
+        <li key={i.id} style={{ padding: "1rem 0", borderBottom: "1px solid #eee" }}>
+          <Link href={`/suspense-nav-test/item/${i.id}`}>{i.text}</Link>
+        </li>
       ))}
     </ul>
   );

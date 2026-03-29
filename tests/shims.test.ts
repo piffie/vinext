@@ -1463,7 +1463,9 @@ describe("next/cache shim", () => {
     await revalidateTag("some-tag");
 
     expect(warnSpy).toHaveBeenCalled();
-    expect(warnSpy.mock.calls[0][0]).toMatch(/deprecated|second argument|max/i);
+    expect(warnSpy.mock.calls[0][0]).toMatch(
+      /"revalidateTag" without the second argument is now deprecated/,
+    );
 
     warnSpy.mockRestore();
     setCacheHandler(new MemoryCacheHandler());

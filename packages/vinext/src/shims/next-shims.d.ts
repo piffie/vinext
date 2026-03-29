@@ -422,6 +422,18 @@ declare module "next/font/local" {
 }
 
 declare module "next/cache" {
+  /**
+   * Controls stale-while-revalidate behaviour when calling `revalidateTag`
+   * with a profile. Mirrors the Next.js 16 `TagRevalidationDurations` shape.
+   *
+   * - `expire`: seconds until tagged entries become a hard miss. When omitted
+   *   (or 0), revalidation is immediate (no SWR window).
+   */
+  export interface TagRevalidationDurations {
+    /** Seconds until tagged entries are hard-expired (forced cache miss). */
+    expire?: number;
+  }
+
   export interface CacheHandler {
     get(key: string, ctx?: Record<string, unknown>): Promise<CacheHandlerValue | null>;
     set(
@@ -429,7 +441,7 @@ declare module "next/cache" {
       data: IncrementalCacheValue | null,
       ctx?: Record<string, unknown>,
     ): Promise<void>;
-    revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void>;
+    revalidateTag(tags: string | string[], durations?: TagRevalidationDurations): Promise<void>;
     resetRequestCache?(): void;
   }
 
@@ -478,13 +490,16 @@ declare module "next/cache" {
       data: IncrementalCacheValue | null,
       ctx?: Record<string, unknown>,
     ): Promise<void>;
-    revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void>;
+    revalidateTag(tags: string | string[], durations?: TagRevalidationDurations): Promise<void>;
     resetRequestCache(): void;
   }
 
   export function setCacheHandler(handler: CacheHandler): void;
   export function getCacheHandler(): CacheHandler;
-  export function revalidateTag(tag: string, profile?: string | { expire?: number }): Promise<void>;
+  export function revalidateTag(
+    tag: string,
+    profile?: string | TagRevalidationDurations,
+  ): Promise<void>;
   export function revalidatePath(path: string, type?: "page" | "layout"): Promise<void>;
   export function updateTag(tag: string): Promise<void>;
   export function refresh(): void;

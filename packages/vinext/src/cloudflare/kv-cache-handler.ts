@@ -576,6 +576,14 @@ function parseKVTagEntry(raw: string | null): KVTagEntry {
  * - `"expired"`: hard miss — entry must not be served.
  * - `"stale"`: SWR — entry may be served stale while background regen runs.
  * - `"fresh"`: no invalidation — entry is still valid.
+ *
+ * DELIBERATE DIVERGENCE FROM NEXT.JS: Next.js uses strict `>` for both
+ * comparisons (see tags-manifest.external.ts: areTagsExpired/areTagsStale).
+ * We use `>=` to handle same-millisecond set()+revalidateTag() calls. With
+ * strict `>`, an entry written at T and invalidated at T would not be
+ * considered expired — a subtle stale-serve bug. The `>=` form is strictly
+ * safer: it is impossible for a cache entry to be newer than its own
+ * invalidation event, so no valid fresh entry is ever incorrectly evicted.
  */
 function checkTagInvalidation(
   tagEntry: KVTagEntry,

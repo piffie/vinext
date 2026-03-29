@@ -251,15 +251,23 @@ export class MemoryCacheHandler implements CacheHandler {
     // For each tag on the entry:
     //   - If `expired` is set and `expired >= entry.lastModified` and `expired <= now`:
     //       hard miss (the tag was invalidated without a profile, or the SWR window
-    //       has itself elapsed). Delete the entry and return null. The >= handles
-    //       same-millisecond set()+revalidateTag() calls.
+    //       has itself elapsed). Delete the entry and return null.
     //   - If `stale` is set and `stale >= entry.lastModified`:
     //       serve stale (profile-based SWR). The entry is still usable; caller will
-    //       trigger background revalidation. The >= handles same-millisecond calls.
+    //       trigger background revalidation.
     //
     // Note: the stale check intentionally comes AFTER the expired check, so that
     // an entry that has both stale and expired set (profile-based revalidation)
     // is correctly evicted once the expire window has passed.
+    //
+    // DELIBERATE DIVERGENCE FROM NEXT.JS: Next.js uses strict `>` for both
+    // comparisons (see tags-manifest.external.ts: areTagsExpired/areTagsStale).
+    // We use `>=` to handle same-millisecond set()+revalidateTag() calls, which
+    // are common in tests and can occur in production under fast execution.
+    // With strict `>`, an entry written at time T and invalidated at time T would
+    // not be considered expired — a subtle stale-serve bug. The `>=` form is
+    // strictly safer: it is impossible for a cache entry to be newer than its
+    // own invalidation event, so no valid fresh entry is ever incorrectly evicted.
     const now = Date.now();
     let isTagStale = false;
 
@@ -359,13 +367,10 @@ export class MemoryCacheHandler implements CacheHandler {
     const now = Date.now();
 
     for (const tag of tagList) {
-      const existing = this.tagManifest.get(tag) ?? {};
-
       if (durations && durations.expire !== undefined && durations.expire > 0) {
         // Profile-based SWR: mark stale immediately (triggers background regen)
         // and set an absolute expire time (after which it's a hard miss).
         this.tagManifest.set(tag, {
-          ...existing,
           stale: now,
           expired: now + durations.expire * 1000,
         });
@@ -374,8 +379,6 @@ export class MemoryCacheHandler implements CacheHandler {
         // Set expired=now so the next get() on any entry with this tag is a hard miss.
         // The >= check in get() ensures same-millisecond set()+revalidateTag() is invalidated.
         this.tagManifest.set(tag, {
-          ...existing,
-          stale: undefined,
           expired: now,
         });
       }

@@ -1506,7 +1506,9 @@ describe("next/cache shim", () => {
   });
 
   it("revalidateTag with expire=0 causes hard miss (no SWR window)", async () => {
-    // expire=0 means the SWR window has already closed — treated as hard expiration.
+    // expire=0 stores { stale: now, expired: now } — since expired <= now the entry
+    // is a hard miss on the next get(). Functionally identical to no-profile, but
+    // the stored manifest shape includes stale (matching Next.js updateTags behaviour).
     const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
 
     const handler = new MemoryCacheHandler();
@@ -1522,12 +1524,42 @@ describe("next/cache shim", () => {
       { tags: ["expire-tag"] },
     );
 
-    // Revalidate with expire=0 — equivalent to immediate hard expiration
+    // Revalidate with expire=0 — expired = now, so hard miss on get()
     await handler.revalidateTag("expire-tag", { expire: 0 });
 
     // expire=0 should behave like no-profile (hard miss)
     const result = await handler.get("expired-swr-entry");
     expect(result).toBeNull();
+  });
+
+  it("revalidateTag with empty durations ({}) returns stale entry (SWR, no expire window)", async () => {
+    // Ported from Next.js default.ts updateTags: when durations is truthy but has no
+    // `expire` field, only `stale` is set in the manifest. The entry is served stale
+    // (SWR with no hard expiry window) — it is NEVER hard-expired by this call alone.
+    // Ref: https://github.com/vercel/next.js/blob/canary/packages/next/src/server/lib/cache-handlers/default.ts
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+
+    const handler = new MemoryCacheHandler();
+
+    await handler.set(
+      "stale-only-entry",
+      {
+        kind: "FETCH",
+        data: { headers: {}, body: '"stale-value"', url: "test" },
+        tags: ["stale-only-tag"],
+        revalidate: 3600,
+      },
+      { tags: ["stale-only-tag"] },
+    );
+
+    // Empty durations object — profile provided but no expire field
+    await handler.revalidateTag("stale-only-tag", {});
+
+    // Entry should be returned as stale (not null) because no hard expiry is set
+    const result = await handler.get("stale-only-entry");
+    expect(result).not.toBeNull();
+    expect(result!.cacheState).toBe("stale");
+    expect(result!.value).not.toBeNull();
   });
 
   it("revalidateTag without profile is a hard miss (no SWR)", async () => {

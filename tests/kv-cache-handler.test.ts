@@ -502,6 +502,73 @@ describe("KVCacheHandler", () => {
       expect(kv.delete).toHaveBeenCalledWith("cache:expired-swr-page");
     });
 
+    it("revalidateTag with expire=0 persists { stale, expired } and causes hard miss", async () => {
+      // expire=0 stores { stale: now, expired: now } (matching Next.js updateTags).
+      // Since expired <= now, get() treats it as a hard miss.
+      const beforeMs = Date.now();
+      await handler.revalidateTag("expire-zero-tag", { expire: 0 });
+      const afterMs = Date.now();
+
+      const raw = store.get("__tag:expire-zero-tag");
+      expect(raw).not.toBeNull();
+      const parsed = JSON.parse(raw!);
+      // Both stale and expired must be set (stale is always set when durations is truthy)
+      expect(typeof parsed.stale).toBe("number");
+      expect(typeof parsed.expired).toBe("number");
+      expect(parsed.stale).toBeGreaterThanOrEqual(beforeMs);
+      expect(parsed.stale).toBeLessThanOrEqual(afterMs + 10);
+      // expired = now + 0*1000 = now, so expired === stale
+      expect(parsed.expired).toBeGreaterThanOrEqual(beforeMs);
+      expect(parsed.expired).toBeLessThanOrEqual(afterMs + 10);
+
+      // Verify get() returns null (hard miss because expired <= now)
+      store.set(
+        "cache:expire-zero-page",
+        JSON.stringify({
+          value: { kind: "PAGES", html: "<p>hi</p>", pageData: {}, status: 200 },
+          tags: ["expire-zero-tag"],
+          lastModified: beforeMs - 1000, // written before the revalidation
+          revalidateAt: null,
+        }),
+      );
+      const result = await handler.get("expire-zero-page");
+      expect(result).toBeNull();
+    });
+
+    it("revalidateTag with empty durations ({}) persists { stale } only and returns stale entry", async () => {
+      // Ported from Next.js default.ts updateTags: when durations is truthy but has no
+      // `expire` field, only `stale` is written to the manifest. The entry is served stale
+      // (SWR with no hard expiry) — it is never hard-expired by this call alone.
+      // Ref: https://github.com/vercel/next.js/blob/canary/packages/next/src/server/lib/cache-handlers/default.ts
+      const beforeMs = Date.now();
+      await handler.revalidateTag("stale-only-tag", {});
+      const afterMs = Date.now();
+
+      const raw = store.get("__tag:stale-only-tag");
+      expect(raw).not.toBeNull();
+      const parsed = JSON.parse(raw!);
+      // Only stale should be set — no expired field
+      expect(typeof parsed.stale).toBe("number");
+      expect(parsed.expired).toBeUndefined();
+      expect(parsed.stale).toBeGreaterThanOrEqual(beforeMs);
+      expect(parsed.stale).toBeLessThanOrEqual(afterMs + 10);
+
+      // Verify get() returns the entry as stale (not null)
+      store.set(
+        "cache:stale-only-page",
+        JSON.stringify({
+          value: { kind: "PAGES", html: "<p>stale</p>", pageData: {}, status: 200 },
+          tags: ["stale-only-tag"],
+          lastModified: beforeMs - 1000, // written before the revalidation
+          revalidateAt: null,
+        }),
+      );
+      const result = await handler.get("stale-only-page");
+      expect(result).not.toBeNull();
+      expect(result!.cacheState).toBe("stale");
+      expect(result!.value).not.toBeNull();
+    });
+
     it("slash-based path tags invalidate persisted APP_PAGE entries (legacy plain-timestamp format)", async () => {
       // Backward compat: old plain-timestamp format (String(ms)) still causes hard miss.
       const entryTime = 1000;

@@ -401,17 +401,21 @@ export class KVCacheHandler implements CacheHandler {
 
     // Build the KVTagEntry payload based on whether a profile was provided.
     //
+    // Matches Next.js default.ts updateTags exactly:
+    //
     // - No profile (hard invalidation): { expired: now }
     //   Entries with lastModified <= expired (and expired <= now at get time) are a hard miss.
     //
-    // - Profile with expire (SWR): { stale: now, expired: now + expire * 1000 }
-    //   Entries are served stale until `expired` is reached, then become a hard miss.
+    // - Profile (any durations object): stale is ALWAYS set.
+    //   - durations = {}            → { stale: now }              (SWR, no hard expiry)
+    //   - durations = { expire: N } → { stale: now, expired: now + N*1000 }
+    //   - durations = { expire: 0 } → { stale: now, expired: now } (immediate hard miss)
     let tagEntry: KVTagEntry;
-    if (durations && durations.expire !== undefined && durations.expire > 0) {
-      tagEntry = {
-        stale: now,
-        expired: now + durations.expire * 1000,
-      };
+    if (durations) {
+      tagEntry = { stale: now };
+      if (durations.expire !== undefined) {
+        tagEntry.expired = now + durations.expire * 1000;
+      }
     } else {
       tagEntry = { expired: now };
     }

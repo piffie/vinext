@@ -367,15 +367,21 @@ export class MemoryCacheHandler implements CacheHandler {
     const now = Date.now();
 
     for (const tag of tagList) {
-      if (durations && durations.expire !== undefined && durations.expire > 0) {
-        // Profile-based SWR: mark stale immediately (triggers background regen)
-        // and set an absolute expire time (after which it's a hard miss).
-        this.tagManifest.set(tag, {
-          stale: now,
-          expired: now + durations.expire * 1000,
-        });
+      if (durations) {
+        // Profile-based invalidation: always mark stale immediately (triggers SWR).
+        // Matches Next.js default.ts updateTags: stale is ALWAYS set when durations
+        // is truthy, and expired is only set when expire is explicitly provided.
+        //
+        //   durations = {}           → { stale: now }              (SWR, no hard expiry)
+        //   durations = { expire: N }→ { stale: now, expired: now + N*1000 }
+        //   durations = { expire: 0 }→ { stale: now, expired: now } (immediate hard miss)
+        const entry: TagManifestEntry = { stale: now };
+        if (durations.expire !== undefined) {
+          entry.expired = now + durations.expire * 1000;
+        }
+        this.tagManifest.set(tag, entry);
       } else {
-        // No profile (or expire=0): immediate hard expiration.
+        // No profile (updateTag / revalidateTag without second arg): immediate hard expiration.
         // Set expired=now so the next get() on any entry with this tag is a hard miss.
         // The >= check in get() ensures same-millisecond set()+revalidateTag() is invalidated.
         this.tagManifest.set(tag, {

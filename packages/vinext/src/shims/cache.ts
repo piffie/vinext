@@ -125,6 +125,21 @@ export interface CacheHandlerContext {
   [key: string]: unknown;
 }
 
+/**
+ * Durations passed to CacheHandler.revalidateTag when a profile is provided.
+ *
+ * When `expire` is undefined, the handler should mark tags as immediately
+ * hard-expired (no SWR window). When `expire` is a positive number, the
+ * handler should serve stale cache entries until `expire` seconds have elapsed,
+ * then force a synchronous fresh render.
+ *
+ * Matches the Next.js 16 CacheHandler revalidateTag signature.
+ */
+export interface TagRevalidationDurations {
+  /** Seconds until the tagged entries are truly expired (hard miss). */
+  expire?: number;
+}
+
 export interface CacheHandler {
   get(key: string, ctx?: Record<string, unknown>): Promise<CacheHandlerValue | null>;
 
@@ -134,7 +149,19 @@ export interface CacheHandler {
     ctx?: Record<string, unknown>,
   ): Promise<void>;
 
-  revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void>;
+  /**
+   * Invalidate cached entries associated with the given tag(s).
+   *
+   * When `durations` is provided (because the caller passed a cacheLife profile),
+   * the handler SHOULD implement stale-while-revalidate: mark entries as stale
+   * immediately (so the next request triggers a background revalidation) but
+   * continue serving them until `durations.expire` seconds have elapsed (hard miss).
+   *
+   * When `durations` is undefined (no profile / `updateTag` call), the handler
+   * SHOULD mark entries as immediately hard-expired — the next request gets a
+   * synchronous fresh render.
+   */
+  revalidateTag(tags: string | string[], durations?: TagRevalidationDurations): Promise<void>;
 
   resetRequestCache?(): void;
 }
@@ -159,7 +186,10 @@ export class NoOpCacheHandler implements CacheHandler {
     // intentionally empty
   }
 
-  async revalidateTag(_tags: string | string[], _durations?: { expire?: number }): Promise<void> {
+  async revalidateTag(
+    _tags: string | string[],
+    _durations?: TagRevalidationDurations,
+  ): Promise<void> {
     // intentionally empty
   }
 }
@@ -177,6 +207,25 @@ interface MemoryEntry {
 }
 
 /**
+ * Per-tag invalidation state stored by MemoryCacheHandler.
+ *
+ * Mirrors the Next.js FileSystemCache TagManifestEntry shape:
+ * - `stale`: absolute ms timestamp after which entries are served stale (SWR)
+ * - `expired`: absolute ms timestamp after which entries are hard-expired (miss)
+ *
+ * When only `expired` is set (no profile / hard invalidation), cache entries
+ * whose `lastModified < expired` are a hard miss on the next get().
+ *
+ * When `stale` is also set (profile with expire window), entries whose
+ * `lastModified < stale` are returned with `cacheState: "stale"` until
+ * `expired` is reached, at which point they become a hard miss.
+ */
+interface TagManifestEntry {
+  stale?: number;
+  expired?: number;
+}
+
+/**
  * Shape of the optional `ctx` argument passed to `CacheHandler.set()`.
  * Covers both the older `{ revalidate: number }` shape and the newer
  * `{ cacheControl: { revalidate: number } }` shape (Next.js 16).
@@ -191,21 +240,57 @@ interface SetCtx {
 
 export class MemoryCacheHandler implements CacheHandler {
   private store = new Map<string, MemoryEntry>();
-  private tagRevalidatedAt = new Map<string, number>();
+  private tagManifest = new Map<string, TagManifestEntry>();
 
   async get(key: string, _ctx?: Record<string, unknown>): Promise<CacheHandlerValue | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
 
-    // Check tag-based invalidation first — if tag was invalidated, treat as hard miss.
-    // Note: the stale entry is deleted here as a side effect of the read, not on write.
-    // This keeps memory bounded without a separate eviction pass.
+    // Check tag-based invalidation using the Next.js stale/expired two-phase model.
+    //
+    // For each tag on the entry:
+    //   - If `expired` is set and `expired >= entry.lastModified` and `expired <= now`:
+    //       hard miss (the tag was invalidated without a profile, or the SWR window
+    //       has itself elapsed). Delete the entry and return null. The >= handles
+    //       same-millisecond set()+revalidateTag() calls.
+    //   - If `stale` is set and `stale >= entry.lastModified`:
+    //       serve stale (profile-based SWR). The entry is still usable; caller will
+    //       trigger background revalidation. The >= handles same-millisecond calls.
+    //
+    // Note: the stale check intentionally comes AFTER the expired check, so that
+    // an entry that has both stale and expired set (profile-based revalidation)
+    // is correctly evicted once the expire window has passed.
+    const now = Date.now();
+    let isTagStale = false;
+
     for (const tag of entry.tags) {
-      const revalidatedAt = this.tagRevalidatedAt.get(tag);
-      if (revalidatedAt && revalidatedAt >= entry.lastModified) {
+      const manifest = this.tagManifest.get(tag);
+      if (!manifest) continue;
+
+      const { stale, expired } = manifest;
+
+      // Hard expiry check: expired was set AND the invalidation happened at or
+      // after the entry was last written (>= handles same-millisecond set+revalidate).
+      if (typeof expired === "number" && expired >= entry.lastModified && expired <= now) {
         this.store.delete(key);
         return null;
       }
+
+      // Stale check (SWR window): stale timestamp was set at or after the entry
+      // was last written — the tag was revalidated with a profile. Serve stale
+      // until the expire window closes. Use >= to handle same-millisecond calls.
+      if (typeof stale === "number" && stale >= entry.lastModified) {
+        isTagStale = true;
+        // Don't break — we still need to check remaining tags for hard expiry.
+      }
+    }
+
+    if (isTagStale) {
+      return {
+        lastModified: entry.lastModified,
+        value: entry.value,
+        cacheState: "stale",
+      };
     }
 
     // Check time-based expiry — return stale entry with cacheState="stale"
@@ -266,11 +351,34 @@ export class MemoryCacheHandler implements CacheHandler {
     });
   }
 
-  async revalidateTag(tags: string | string[], _durations?: { expire?: number }): Promise<void> {
+  async revalidateTag(
+    tags: string | string[],
+    durations?: TagRevalidationDurations,
+  ): Promise<void> {
     const tagList = Array.isArray(tags) ? tags : [tags];
     const now = Date.now();
+
     for (const tag of tagList) {
-      this.tagRevalidatedAt.set(tag, now);
+      const existing = this.tagManifest.get(tag) ?? {};
+
+      if (durations && durations.expire !== undefined && durations.expire > 0) {
+        // Profile-based SWR: mark stale immediately (triggers background regen)
+        // and set an absolute expire time (after which it's a hard miss).
+        this.tagManifest.set(tag, {
+          ...existing,
+          stale: now,
+          expired: now + durations.expire * 1000,
+        });
+      } else {
+        // No profile (or expire=0): immediate hard expiration.
+        // Set expired=now so the next get() on any entry with this tag is a hard miss.
+        // The >= check in get() ensures same-millisecond set()+revalidateTag() is invalidated.
+        this.tagManifest.set(tag, {
+          ...existing,
+          stale: undefined,
+          expired: now,
+        });
+      }
     }
   }
 
@@ -338,19 +446,34 @@ export function getCacheHandler(): CacheHandler {
  * Works with both `fetch(..., { next: { tags: ['myTag'] } })` and
  * `unstable_cache(fn, keys, { tags: ['myTag'] })`.
  *
- * Next.js 16 updated signature: accepts a cacheLife profile as second argument
- * for stale-while-revalidate (SWR) behavior. The single-argument form is
- * deprecated but still supported for backward compatibility.
+ * Next.js 16 updated signature: the second `profile` argument is now **required**.
+ * Omitting it causes a TypeScript build error in Next.js 16 and triggers a
+ * deprecation warning at runtime. Use `'max'` as the default recommended value
+ * for stale-while-revalidate semantics:
+ *
+ *   revalidateTag('my-tag', 'max')
+ *
+ * To hard-expire a tag without SWR (e.g. from a Server Action), use `updateTag()`
+ * instead, which has no profile argument and always hard-expires immediately.
  *
  * @param tag - Cache tag to revalidate
- * @param profile - cacheLife profile name (e.g. 'max', 'hours') or inline { expire: number }
+ * @param profile - cacheLife profile name (e.g. 'max', 'hours') or inline { expire: number }.
+ *   Required in Next.js 16. Omitting it emits a deprecation warning and falls back
+ *   to immediate hard expiration (same as updateTag).
  */
 export async function revalidateTag(
   tag: string,
   profile?: string | { expire?: number },
 ): Promise<void> {
+  if (!profile) {
+    console.warn(
+      '"revalidateTag" without the second argument is now deprecated, add second argument of "max" ' +
+        'or use "updateTag". See more info here: https://nextjs.org/docs/messages/revalidate-tag-single-arg',
+    );
+  }
+
   // Resolve the profile to durations for the handler
-  let durations: { expire?: number } | undefined;
+  let durations: TagRevalidationDurations | undefined;
   if (typeof profile === "string") {
     const resolved = cacheLifeProfiles[profile];
     if (resolved) {

@@ -418,14 +418,92 @@ describe("KVCacheHandler", () => {
   });
 
   describe("tag invalidation", () => {
-    it("revalidateTag persists slash-based path invalidation markers", async () => {
+    it("revalidateTag persists slash-based path invalidation markers as JSON", async () => {
       await handler.revalidateTag(["/revalidate-tag-test", "_N_T_/revalidate-tag-test"]);
 
-      expect(store.get("__tag:/revalidate-tag-test")).toMatch(/^\d+$/);
-      expect(store.get("__tag:_N_T_/revalidate-tag-test")).toMatch(/^\d+$/);
+      // New format: JSON object with { expired: <timestamp> } for hard invalidation
+      const raw1 = store.get("__tag:/revalidate-tag-test");
+      const raw2 = store.get("__tag:_N_T_/revalidate-tag-test");
+      expect(raw1).not.toBeNull();
+      expect(raw2).not.toBeNull();
+      const parsed1 = JSON.parse(raw1!);
+      const parsed2 = JSON.parse(raw2!);
+      expect(typeof parsed1.expired).toBe("number");
+      expect(typeof parsed2.expired).toBe("number");
+      // No stale field for hard invalidation (no profile)
+      expect(parsed1.stale).toBeUndefined();
+      expect(parsed2.stale).toBeUndefined();
     });
 
-    it("slash-based path tags invalidate persisted APP_PAGE entries", async () => {
+    it("revalidateTag with profile persists stale+expired fields (SWR)", async () => {
+      // Ported from Next.js FileSystemCache behaviour: profile-based revalidation
+      // sets both stale (immediate) and expired (stale + expire window).
+      const beforeMs = Date.now();
+      await handler.revalidateTag("swr-tag", { expire: 3600 });
+      const afterMs = Date.now();
+
+      const raw = store.get("__tag:swr-tag");
+      expect(raw).not.toBeNull();
+      const parsed = JSON.parse(raw!);
+      expect(typeof parsed.stale).toBe("number");
+      expect(typeof parsed.expired).toBe("number");
+      // stale should be approximately now
+      expect(parsed.stale).toBeGreaterThanOrEqual(beforeMs);
+      expect(parsed.stale).toBeLessThanOrEqual(afterMs + 10);
+      // expired should be stale + 3600 seconds
+      expect(parsed.expired).toBeCloseTo(parsed.stale + 3600 * 1000, -2);
+    });
+
+    it("revalidateTag with profile returns stale entry (SWR), not null", async () => {
+      // Ported from Next.js FileSystemCache: profile-based revalidateTag marks entries
+      // as stale for SWR rather than hard-deleting them.
+      const entryTime = Date.now() - 1000; // written 1s ago
+
+      store.set(
+        "cache:swr-page",
+        JSON.stringify({
+          value: { kind: "PAGES", html: "<p>stale</p>", pageData: {}, status: 200 },
+          tags: ["swr-profile-tag"],
+          lastModified: entryTime,
+          revalidateAt: null,
+        }),
+      );
+
+      // Invalidate with a 1-hour SWR window
+      await handler.revalidateTag("swr-profile-tag", { expire: 3600 });
+
+      // Entry should be returned as stale (not null)
+      const result = await handler.get("swr-page");
+      expect(result).not.toBeNull();
+      expect(result!.cacheState).toBe("stale");
+      expect(result!.value).not.toBeNull();
+    });
+
+    it("revalidateTag with expired SWR window causes hard miss", async () => {
+      // When the expire window has already elapsed, entry must be a hard miss.
+      const entryTime = 1000; // very old entry
+      const staleAt = 2000; // stale marked after entry
+      const expiredAt = 3000; // expire window already passed (Date.now() >> 3000)
+
+      store.set(
+        "cache:expired-swr-page",
+        JSON.stringify({
+          value: { kind: "PAGES", html: "<p>expired</p>", pageData: {}, status: 200 },
+          tags: ["expired-swr-tag"],
+          lastModified: entryTime,
+          revalidateAt: null,
+        }),
+      );
+      // Manually set a tag entry where both stale and expired are in the past
+      store.set("__tag:expired-swr-tag", JSON.stringify({ stale: staleAt, expired: expiredAt }));
+
+      const result = await handler.get("expired-swr-page");
+      expect(result).toBeNull();
+      expect(kv.delete).toHaveBeenCalledWith("cache:expired-swr-page");
+    });
+
+    it("slash-based path tags invalidate persisted APP_PAGE entries (legacy plain-timestamp format)", async () => {
+      // Backward compat: old plain-timestamp format (String(ms)) still causes hard miss.
       const entryTime = 1000;
       const invalidatedTime = 2000;
 
@@ -769,10 +847,13 @@ describe("KVCacheHandler", () => {
       expect(kv.get).toHaveBeenCalledWith("__tag:t3");
     });
 
-    it("NaN tag timestamp in local cache treated as invalidation", async () => {
+    it("unparseable tag value in KV is ignored (not treated as invalidation)", async () => {
+      // With the new JSON tag format, a completely unrecognizable value (neither valid
+      // JSON nor a legacy numeric timestamp) is treated as "no invalidation" rather
+      // than causing a hard miss. This is the safe default — don't evict on corrupt data.
       const entryTime = 1000;
 
-      // Put a non-numeric tag value in KV
+      // Put a non-numeric, non-JSON tag value in KV
       store.set("__tag:bad-tag", "not-a-number");
 
       store.set(
@@ -785,29 +866,9 @@ describe("KVCacheHandler", () => {
         }),
       );
 
-      // First get() — fetches from KV, gets NaN, caches it, returns null
-      const result1 = await handler.get("nan-page");
-      expect(result1).toBeNull();
-
-      kv.get.mockClear();
-
-      // Re-store the entry (it was deleted by the first get)
-      store.set(
-        "cache:nan-page",
-        JSON.stringify({
-          value: { kind: "PAGES", html: "<p>hi</p>", pageData: {}, status: 200 },
-          tags: ["bad-tag"],
-          lastModified: entryTime,
-          revalidateAt: null,
-        }),
-      );
-
-      // Second get() — NaN is in local cache, should still treat as invalidation
-      const result2 = await handler.get("nan-page");
-      expect(result2).toBeNull();
-
-      // kv.get: 1 for entry, 0 for tag (NaN was cached locally)
-      expect(kv.get).toHaveBeenCalledTimes(1);
+      // get() should NOT be invalidated — corrupted tag value is ignored
+      const result = await handler.get("nan-page");
+      expect(result).not.toBeNull();
     });
 
     it("resetRequestCache() forces tags to be re-fetched from KV", async () => {

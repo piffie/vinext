@@ -1445,10 +1445,112 @@ describe("next/cache shim", () => {
     await revalidateTag("my-tag", "hours");
     await revalidateTag("my-tag", { expire: 3600 });
 
-    // Should still work without profile (deprecated single-arg form)
+    // Should still work without profile (deprecated single-arg form — emits a warning)
     await revalidateTag("my-tag");
 
     setCacheHandler(new MemoryCacheHandler());
+  });
+
+  it("revalidateTag emits deprecation warning when called without profile", async () => {
+    // Ported from Next.js: packages/next/src/server/web/spec-extension/revalidate.ts
+    // The single-argument form is deprecated in Next.js 16 and emits a console.warn.
+    const { revalidateTag, setCacheHandler, MemoryCacheHandler } =
+      await import("../packages/vinext/src/shims/cache.js");
+
+    setCacheHandler(new MemoryCacheHandler());
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await revalidateTag("some-tag");
+
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0][0]).toMatch(/deprecated|second argument|max/i);
+
+    warnSpy.mockRestore();
+    setCacheHandler(new MemoryCacheHandler());
+  });
+
+  it("revalidateTag with profile returns stale entry (SWR) instead of hard miss", async () => {
+    // Ported from Next.js behaviour: when a profile is provided, revalidateTag marks
+    // entries as stale (for SWR background revalidation) rather than hard-deleting them.
+    // The entry should be returned with cacheState="stale" until expire elapses.
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+
+    const handler = new MemoryCacheHandler();
+
+    await handler.set(
+      "swr-entry",
+      {
+        kind: "FETCH",
+        data: { headers: {}, body: '"stale-value"', url: "test" },
+        tags: ["my-swr-tag"],
+        revalidate: 3600,
+      },
+      { tags: ["my-swr-tag"] },
+    );
+
+    // Before invalidation: entry is fresh
+    let result = await handler.get("swr-entry");
+    expect(result).not.toBeNull();
+    expect(result!.cacheState).toBeUndefined();
+
+    // Revalidate with a profile that has a long expire window (SWR behaviour)
+    await handler.revalidateTag("my-swr-tag", { expire: 3600 });
+
+    // After revalidation: entry should be returned as stale (not null) for SWR
+    result = await handler.get("swr-entry");
+    expect(result).not.toBeNull();
+    expect(result!.cacheState).toBe("stale");
+    expect(result!.value).not.toBeNull();
+  });
+
+  it("revalidateTag with expire=0 causes hard miss (no SWR window)", async () => {
+    // expire=0 means the SWR window has already closed — treated as hard expiration.
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+
+    const handler = new MemoryCacheHandler();
+
+    await handler.set(
+      "expired-swr-entry",
+      {
+        kind: "FETCH",
+        data: { headers: {}, body: '"will-expire"', url: "test" },
+        tags: ["expire-tag"],
+        revalidate: 3600,
+      },
+      { tags: ["expire-tag"] },
+    );
+
+    // Revalidate with expire=0 — equivalent to immediate hard expiration
+    await handler.revalidateTag("expire-tag", { expire: 0 });
+
+    // expire=0 should behave like no-profile (hard miss)
+    const result = await handler.get("expired-swr-entry");
+    expect(result).toBeNull();
+  });
+
+  it("revalidateTag without profile is a hard miss (no SWR)", async () => {
+    // Ported from Next.js: no-profile revalidateTag is immediate hard expiration.
+    // The entry must not be returned at all (not even as stale).
+    const { MemoryCacheHandler } = await import("../packages/vinext/src/shims/cache.js");
+
+    const handler = new MemoryCacheHandler();
+
+    await handler.set(
+      "hard-miss-entry",
+      {
+        kind: "FETCH",
+        data: { headers: {}, body: '"cached"', url: "test" },
+        tags: ["hard-tag"],
+        revalidate: 3600,
+      },
+      { tags: ["hard-tag"] },
+    );
+
+    // Without profile — hard invalidation
+    await handler.revalidateTag("hard-tag");
+
+    const result = await handler.get("hard-miss-entry");
+    expect(result).toBeNull();
   });
 
   it("exports updateTag function (Next.js 16)", async () => {

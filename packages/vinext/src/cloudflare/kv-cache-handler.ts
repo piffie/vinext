@@ -37,6 +37,7 @@ import type {
   CachedRouteValue,
   CachedImageValue,
   IncrementalCacheValue,
+  TagRevalidationDurations,
 } from "../shims/cache.js";
 import { getRequestExecutionContext, type ExecutionContextLike } from "../shims/request-context.js";
 
@@ -88,6 +89,35 @@ interface KVCacheEntry {
   revalidateAt: number | null;
 }
 
+/**
+ * Shape stored in KV under `__tag:<tagname>` keys.
+ *
+ * When a tag is invalidated without a profile (hard invalidation), only
+ * `expired` is set to `Date.now()`. Entries with `lastModified < expired` are
+ * a hard miss on the next `get()`.
+ *
+ * When a tag is invalidated WITH a cacheLife profile, `stale` is also set so
+ * the cache handler can serve stale entries (SWR) until `expired` is reached.
+ *
+ * Backward compat: the old format stored a plain timestamp string instead of
+ * JSON. Reads that produce a non-JSON value are treated as hard invalidation
+ * with `expired = parsedTimestamp`.
+ */
+interface KVTagEntry {
+  /** Absolute ms timestamp at which the tag was marked stale (SWR start). */
+  stale?: number;
+  /** Absolute ms timestamp after which entries with this tag are a hard miss. */
+  expired?: number;
+}
+
+/**
+ * Local in-memory representation of a fetched tag entry.
+ * Extends KVTagEntry with the time we fetched it (for TTL bookkeeping).
+ */
+interface CachedTagEntry extends KVTagEntry {
+  fetchedAt: number;
+}
+
 /** Key prefix for tag invalidation timestamps. */
 const TAG_PREFIX = "__tag:";
 
@@ -136,8 +166,8 @@ export class KVCacheHandler implements CacheHandler {
   private ctx: ExecutionContextLike | undefined;
   private ttlSeconds: number;
 
-  /** Local in-memory cache for tag invalidation timestamps. Avoids redundant KV reads. */
-  private _tagCache = new Map<string, { timestamp: number; fetchedAt: number }>();
+  /** Local in-memory cache for tag invalidation entries. Avoids redundant KV reads. */
+  private _tagCache = new Map<string, CachedTagEntry>();
   /** TTL (ms) for local tag cache entries. After this, re-fetch from KV. */
   private _tagCacheTtl: number;
 
@@ -192,7 +222,7 @@ export class KVCacheHandler implements CacheHandler {
       }
     }
 
-    // Check tag-based invalidation.
+    // Check tag-based invalidation using the two-phase stale/expired model.
     // Uses a local in-memory cache to avoid redundant KV reads for recently-seen tags.
     if (entry.tags.length > 0) {
       const now = Date.now();
@@ -203,11 +233,13 @@ export class KVCacheHandler implements CacheHandler {
       for (const tag of entry.tags) {
         const cached = this._tagCache.get(tag);
         if (cached && now - cached.fetchedAt < this._tagCacheTtl) {
-          // Local cache hit — check invalidation inline
-          if (Number.isNaN(cached.timestamp) || cached.timestamp >= entry.lastModified) {
+          // Local cache hit — apply invalidation check
+          const result = checkTagInvalidation(cached, entry.lastModified, now);
+          if (result === "expired") {
             this._deleteInBackground(kvKey);
             return null;
           }
+          // "stale" is handled after all tags are checked (below)
         } else {
           // Expired or absent — evict stale entry and re-fetch from KV
           if (cached) this._tagCache.delete(tag);
@@ -229,21 +261,39 @@ export class KVCacheHandler implements CacheHandler {
         // earlier tag would cause an early return — so subsequent get() calls
         // for entries sharing those tags don't redundantly re-fetch from KV.
         for (let i = 0; i < uncachedTags.length; i++) {
-          const tagTime = tagResults[i];
-          const tagTimestamp = tagTime ? Number(tagTime) : 0;
-          this._tagCache.set(uncachedTags[i], { timestamp: tagTimestamp, fetchedAt: now });
+          const tagRaw = tagResults[i];
+          const tagEntry = parseKVTagEntry(tagRaw);
+          this._tagCache.set(uncachedTags[i], { ...tagEntry, fetchedAt: now });
         }
 
-        // Then check for invalidation using the now-cached timestamps
+        // Then check for invalidation using the now-cached entries
         for (const tag of uncachedTags) {
           const cached = this._tagCache.get(tag)!;
-          if (cached.timestamp !== 0) {
-            if (Number.isNaN(cached.timestamp) || cached.timestamp >= entry.lastModified) {
-              this._deleteInBackground(kvKey);
-              return null;
-            }
+          const result = checkTagInvalidation(cached, entry.lastModified, now);
+          if (result === "expired") {
+            this._deleteInBackground(kvKey);
+            return null;
           }
         }
+      }
+
+      // After all hard-expiry checks passed, check for stale-by-tag (SWR).
+      // We do this in a second sweep so a later tag's hard-expiry doesn't get
+      // masked by an earlier tag's stale return.
+      let isTagStale = false;
+      for (const tag of entry.tags) {
+        const cached = this._tagCache.get(tag);
+        if (cached && checkTagInvalidation(cached, entry.lastModified, now) === "stale") {
+          isTagStale = true;
+          break;
+        }
+      }
+      if (isTagStale) {
+        return {
+          lastModified: entry.lastModified,
+          value: restoredValue,
+          cacheState: "stale",
+        };
       }
     }
 
@@ -341,23 +391,46 @@ export class KVCacheHandler implements CacheHandler {
     });
   }
 
-  async revalidateTag(tags: string | string[], _durations?: { expire?: number }): Promise<void> {
+  async revalidateTag(
+    tags: string | string[],
+    durations?: TagRevalidationDurations,
+  ): Promise<void> {
     const tagList = Array.isArray(tags) ? tags : [tags];
     const now = Date.now();
     const validTags = tagList.filter((t) => validateTag(t) !== null);
-    // Store invalidation timestamp for each tag
-    // Use a long TTL (30 days) so recent invalidations are always found
+
+    // Build the KVTagEntry payload based on whether a profile was provided.
+    //
+    // - No profile (hard invalidation): { expired: now }
+    //   Entries with lastModified <= expired (and expired <= now at get time) are a hard miss.
+    //
+    // - Profile with expire (SWR): { stale: now, expired: now + expire * 1000 }
+    //   Entries are served stale until `expired` is reached, then become a hard miss.
+    let tagEntry: KVTagEntry;
+    if (durations && durations.expire !== undefined && durations.expire > 0) {
+      tagEntry = {
+        stale: now,
+        expired: now + durations.expire * 1000,
+      };
+    } else {
+      tagEntry = { expired: now };
+    }
+
+    const tagJson = JSON.stringify(tagEntry);
+
+    // Store invalidation entry for each tag.
+    // Use a long TTL (30 days) so recent invalidations are always found.
     await Promise.all(
       validTags.map((tag) =>
-        this.kv.put(this.prefix + TAG_PREFIX + tag, String(now), {
+        this.kv.put(this.prefix + TAG_PREFIX + tag, tagJson, {
           expirationTtl: 30 * 24 * 3600,
         }),
       ),
     );
     // Update local tag cache immediately so invalidations are reflected
-    // without waiting for the TTL to expire
+    // without waiting for the cache TTL to expire.
     for (const tag of validTags) {
-      this._tagCache.set(tag, { timestamp: now, fetchedAt: now });
+      this._tagCache.set(tag, { ...tagEntry, fetchedAt: now });
     }
   }
 
@@ -465,6 +538,70 @@ export class KVCacheHandler implements CacheHandler {
 // ---------------------------------------------------------------------------
 
 const VALID_KINDS = new Set(["FETCH", "APP_PAGE", "PAGES", "APP_ROUTE", "REDIRECT", "IMAGE"]);
+
+/**
+ * Parse a raw KV tag value into a `KVTagEntry`.
+ *
+ * New format: JSON string `{ stale?: number, expired?: number }`.
+ * Old format (backward compat): plain timestamp string e.g. `"1234567890123"`.
+ * Missing/null: returns `{}` (no invalidation).
+ */
+function parseKVTagEntry(raw: string | null): KVTagEntry {
+  if (!raw) return {};
+  // Try JSON first
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const entry: KVTagEntry = {};
+      if (typeof parsed.stale === "number") entry.stale = parsed.stale;
+      if (typeof parsed.expired === "number") entry.expired = parsed.expired;
+      return entry;
+    }
+  } catch {
+    // Not JSON — fall through to legacy plain-timestamp handling
+  }
+  // Legacy format: plain numeric timestamp string (hard invalidation)
+  const ts = Number(raw);
+  if (!Number.isNaN(ts) && ts > 0) {
+    return { expired: ts };
+  }
+  return {};
+}
+
+/**
+ * Check whether a cache entry (identified by `lastModified`) is invalidated
+ * by the given tag entry, relative to `now`.
+ *
+ * Returns:
+ * - `"expired"`: hard miss — entry must not be served.
+ * - `"stale"`: SWR — entry may be served stale while background regen runs.
+ * - `"fresh"`: no invalidation — entry is still valid.
+ */
+function checkTagInvalidation(
+  tagEntry: KVTagEntry,
+  lastModified: number,
+  now: number,
+): "expired" | "stale" | "fresh" {
+  const { stale, expired } = tagEntry;
+
+  // Hard expiry check: the tag's expired timestamp was set AT OR AFTER the
+  // entry was last written, AND the expiry time has now been reached.
+  // Use >= (not >) so same-millisecond set()+revalidateTag() still invalidates.
+  if (typeof expired === "number" && expired >= lastModified && expired <= now) {
+    return "expired";
+  }
+
+  // Stale-by-tag (SWR): the tag's stale timestamp was set AT OR AFTER the
+  // entry was last written. Serve the entry stale — caller will trigger
+  // background regen. Use >= to handle same-millisecond set+revalidateTag.
+  // Note: we only reach here when the expire window hasn't closed yet (or no
+  // expire is set, which means the profile-based SWR has no hard expiry).
+  if (typeof stale === "number" && stale >= lastModified) {
+    return "stale";
+  }
+
+  return "fresh";
+}
 
 /**
  * Validate that a parsed JSON value has the expected KVCacheEntry shape.

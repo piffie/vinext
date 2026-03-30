@@ -64,7 +64,7 @@ type SerializedIncrementalCacheValue =
   | SerializedCachedImageValue;
 
 // Cloudflare KV namespace interface (matches Workers types)
-interface KVNamespace {
+type KVNamespace = {
   get(key: string, options?: { type?: string }): Promise<string | null>;
   get(key: string, options: { type: "arrayBuffer" }): Promise<ArrayBuffer | null>;
   put(
@@ -78,16 +78,16 @@ interface KVNamespace {
     list_complete: boolean;
     cursor?: string;
   }>;
-}
+};
 
 /** Shape stored in KV for each cache entry. */
-interface KVCacheEntry {
+type KVCacheEntry = {
   value: SerializedIncrementalCacheValue | null;
   tags: string[];
   lastModified: number;
   /** Absolute timestamp (ms) after which the entry is "stale" (but still served). */
   revalidateAt: number | null;
-}
+};
 
 /**
  * Shape stored in KV under `__tag:<tagname>` keys.
@@ -103,20 +103,20 @@ interface KVCacheEntry {
  * JSON. Reads that produce a non-JSON value are treated as hard invalidation
  * with `expired = parsedTimestamp`.
  */
-interface KVTagEntry {
+type KVTagEntry = {
   /** Absolute ms timestamp at which the tag was marked stale (SWR start). */
   stale?: number;
   /** Absolute ms timestamp after which entries with this tag are a hard miss. */
   expired?: number;
-}
+};
 
 /**
  * Local in-memory representation of a fetched tag entry.
  * Extends KVTagEntry with the time we fetched it (for TTL bookkeeping).
  */
-interface CachedTagEntry extends KVTagEntry {
+type CachedTagEntry = {
   fetchedAt: number;
-}
+} & KVTagEntry;
 
 /** Key prefix for tag invalidation timestamps. */
 const TAG_PREFIX = "__tag:";
@@ -143,7 +143,7 @@ function validateTag(tag: string): string | null {
   // Block control characters and reserved separators used in our own key format.
   // Slash is allowed because revalidatePath() relies on pathname tags like
   // "/posts/hello" and "_N_T_/posts/hello".
-  // eslint-disable-next-line no-control-regex -- intentional: reject control chars in tags
+  // oxlint-disable-next-line no-control-regex -- intentional: reject control chars in tags
   if (/[\x00-\x1f\\:]/.test(tag)) return null;
   return tag;
 }
@@ -337,6 +337,7 @@ export class KVCacheHandler implements CacheHandler {
     // revalidate: 0 means "don't cache", so skip storage entirely.
     let effectiveRevalidate: number | undefined;
     if (ctx) {
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any
       const revalidate = (ctx as any).cacheControl?.revalidate ?? (ctx as any).revalidate;
       if (typeof revalidate === "number") {
         effectiveRevalidate = revalidate;

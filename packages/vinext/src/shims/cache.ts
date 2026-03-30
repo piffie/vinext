@@ -303,7 +303,7 @@ export class MemoryCacheHandler implements CacheHandler {
 
     // Check time-based expiry — return stale entry with cacheState="stale"
     // instead of deleting, so ISR can serve stale-while-revalidate
-    if (entry.revalidateAt !== null && Date.now() > entry.revalidateAt) {
+    if (entry.revalidateAt !== null && now > entry.revalidateAt) {
       return {
         lastModified: entry.lastModified,
         value: entry.value,

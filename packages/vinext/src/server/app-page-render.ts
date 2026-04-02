@@ -192,7 +192,7 @@ export async function renderAppPageLifecycle(
       isrDebug: options.isrDebug,
       isrRscKey: options.isrRscKey,
       isrSet: options.isrSet,
-      revalidateSeconds: revalidateSeconds ?? 0,
+      revalidateSeconds,
       waitUntil(promise) {
         options.waitUntil?.(promise);
       },

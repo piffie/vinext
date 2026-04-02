@@ -501,6 +501,13 @@ type BrowserNavigateOptions = {
 export type NextInstance = {
   /** Base URL of the running dev server, e.g. "http://localhost:52341" */
   url: string;
+  /**
+   * Root directory used by the test to locate build artifacts.
+   * In dev mode: the fixture directory (opts.files).
+   * In start mode: the tmpDir where the production build was written.
+   * Mirrors the upstream Next.js e2e `next.testDir` property.
+   */
+  testDir: string;
   fetch(urlPath: string, init?: RequestInit): Promise<Response>;
   render(urlPath: string, query?: Record<string, string> | RequestInit, init?: RequestInit): Promise<string>;
   render$(urlPath: string, query?: Record<string, string> | RequestInit, init?: RequestInit): Promise<CheerioStatic>;
@@ -764,8 +771,11 @@ function makeNextInstance(
   doStop: () => Promise<void>,
   getBaseUrl: () => string,
   getCliOutput?: () => string,
+  testDir?: string,
 ): NextInstance {
   const next: NextInstance = {
+    testDir: testDir ?? opts.files,
+
     get url() {
       return getBaseUrl();
     },
@@ -990,7 +1000,89 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     });
     await builder.buildApp();
 
-    // Restore console
+    // Run prerender phase so ISR/force-static routes are seeded into the
+    // memory cache at server startup (via seedMemoryCacheFromPrerender).
+    // Output goes to tmpDir/server/prerendered-routes/ and the manifest to
+    // tmpDir/server/vinext-prerender.json — exactly where the prod server
+    // expects them.
+    // Debug: show vinext-server.json contents to verify buildId is present
+    const serverManifestPath = path.join(tmpDir, "server", "vinext-server.json");
+    if (fs.existsSync(serverManifestPath)) {
+      const serverManifest = JSON.parse(fs.readFileSync(serverManifestPath, "utf-8"));
+      const { buildId } = serverManifest;
+      origLog("[vinext-e2e] vinext-server.json:", JSON.stringify({ ...serverManifest, prerenderSecret: "<redacted>" }));
+      // Check if the RSC bundle contains the buildId
+      const rscBundlePath = path.join(tmpDir, "server", "index.js");
+      if (fs.existsSync(rscBundlePath) && buildId) {
+        const bundleHead = fs.readFileSync(rscBundlePath, "utf-8").slice(0, 50000);
+        const hasBuildId = bundleHead.includes(buildId);
+        origLog("[vinext-e2e] RSC bundle contains buildId:", hasBuildId, "(looked for:", buildId, ")");
+      }
+    } else {
+      origWarn("[vinext-e2e] vinext-server.json NOT FOUND at", serverManifestPath);
+    }
+
+    // Install the external-API mock BEFORE the prerender phase so that both
+    // prerender renders and test-time requests use mocked responses.
+    // The prod server and prerender run in the same process, so the mock is
+    // shared via globalThis[Symbol.for(...)].
+    const _OVERRIDE_KEY = Symbol.for("vinext.fetchCache.override");
+    const _rawFetch = ((globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.originalFetch")] as typeof fetch | undefined) ?? fetch;
+    (globalThis as Record<PropertyKey, unknown>)[_OVERRIDE_KEY] = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (
+        url.startsWith("https://next-data-api-endpoint.vercel.app/api/random") &&
+        !url.includes("status=")
+      ) {
+        const resp = new Response(Math.random().toString(), {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+        // Response.url is read-only; set it via defineProperty so tests that
+        // read res.url (e.g. the /response-url route) get the correct value.
+        Object.defineProperty(resp, "url", { get: () => url, configurable: true });
+        return resp;
+      }
+      return _rawFetch(input as RequestInfo, init);
+    };
+
+    try {
+      const { runPrerender } = await import(
+        path.resolve(import.meta.dirname, "../../../packages/vinext/dist/build/run-prerender.js")
+      );
+      await runPrerender({
+        root: opts.files,
+        rscBundlePath: path.join(tmpDir, "server", "index.js"),
+        outDir: path.join(tmpDir, "server", "prerendered-routes"),
+        manifestDir: path.join(tmpDir, "server"),
+      });
+    } catch (prerenderErr) {
+      // Prerender failures are non-fatal for test infrastructure — the prod
+      // server will still start and serve dynamic responses.
+      origWarn("[vinext-e2e] prerender phase failed (non-fatal):", prerenderErr);
+    }
+
+    // Create the .next/server/app symlink so tests that read build artifacts
+    // via next.testDir + '.next/server/app' can find prerendered files.
+    // vinext writes to tmpDir/server/prerendered-routes/; the symlink maps
+    // the Next.js-standard path onto our actual output location.
+    const dotNextServerApp = path.join(tmpDir, ".next", "server", "app");
+    await fs.promises.mkdir(path.dirname(dotNextServerApp), { recursive: true });
+    const prerenderRoutesDir = path.join(tmpDir, "server", "prerendered-routes");
+    await fs.promises.mkdir(prerenderRoutesDir, { recursive: true });
+    await fs.promises.symlink(prerenderRoutesDir, dotNextServerApp).catch(() => {
+      // Ignore if symlink already exists
+    });
+
+    // Restore console (build phase is done)
     console.log = origLog;
     console.warn = origWarn;
     console.error = origError;
@@ -1006,17 +1098,37 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     });
     _httpServer = server;
 
+    // Re-install console capture for server runtime logs so next.cliOutput
+    // accumulates them (tests that check cliOutput rely on server-side output).
+    console.log = (...a) => {
+      _buildOutput += a.map(String).join(" ") + "\n";
+      origLog(...a);
+    };
+    console.warn = (...a) => {
+      _buildOutput += a.map(String).join(" ") + "\n";
+      origWarn(...a);
+    };
+    console.error = (...a) => {
+      _buildOutput += a.map(String).join(" ") + "\n";
+      origError(...a);
+    };
+
     const addr = server.address();
     const port = typeof addr === "object" && addr ? addr.port : 3000;
     const baseUrl = `http://127.0.0.1:${port}`;
 
     async function doStop() {
+      // Restore console before teardown
+      console.log = origLog;
+      console.warn = origWarn;
+      console.error = origError;
+      delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.override")];
       await new Promise<void>((resolve) => _httpServer?.close(() => resolve()) ?? resolve());
       _httpServer = null;
       await fs.promises.rm(tmpDir, { recursive: true, force: true });
     }
 
-    const next = makeNextInstance(opts, async () => {}, doStop, () => baseUrl, () => _buildOutput);
+    const next = makeNextInstance(opts, async () => {}, doStop, () => baseUrl, () => _buildOutput, tmpDir);
 
     // Provide stub Next.js manifest files so isNextStart-gated beforeAll blocks
     // don't throw when reading files that only exist in a real `next build`.
@@ -1106,10 +1218,12 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
         url.startsWith("https://next-data-api-endpoint.vercel.app/api/random") &&
         !url.includes("status=")
       ) {
-        return new Response(Math.random().toString(), {
+        const resp = new Response(Math.random().toString(), {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
+        Object.defineProperty(resp, "url", { get: () => url, configurable: true });
+        return resp;
       }
       return _rawFetch(input as RequestInfo, init);
     };

@@ -2045,6 +2045,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     const handler = route.routeHandler;
     const method = request.method.toUpperCase();
     const revalidateSeconds = __getAppRouteHandlerRevalidateSeconds(handler);
+    // Apply the route handler's fetchCache export so patchedFetch() overrides
+    // per-fetch cache directives (e.g. fetchCache='force-cache' caches all fetches).
+    if (handler.fetchCache) {
+      _setPageFetchCachePolicy(handler.fetchCache);
+    }
     if (__hasAppRouteHandlerDefaultExport(handler) && process.env.NODE_ENV === "development") {
       console.error(
         "[vinext] Detected default export in route handler " + route.pattern + ". Export a named export for each HTTP method instead.",
@@ -2195,6 +2200,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       searchParams: new URLSearchParams(),
       params,
     });
+    // force-static routes without an explicit revalidate must also be served
+    // from the ISR cache — otherwise revalidateSeconds stays null, the ISR
+    // cache check below is skipped, and every request re-renders the page.
+    // Use a 1-year TTL so the entry is effectively permanent.
+    if (revalidateSeconds === null) revalidateSeconds = 31536000;
   }
 
   // dynamic = 'error': install an access error so request APIs fail with the
@@ -2217,7 +2227,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   }
 
   // force-dynamic: set no-store Cache-Control
-  const isForceDynamic = dynamicConfig === "force-dynamic";
+  // Also treat fetchCache = "force-no-store" as force-dynamic so those pages
+  // bypass the ISR cache and return Cache-Control: no-store, which prevents
+  // the prerender phase from incorrectly seeding them into the ISR cache.
+  const isForceDynamic =
+    dynamicConfig === "force-dynamic" || route.page?.fetchCache === "force-no-store";
 
   // ── ISR cache read (production only) ─────────────────────────────────────
   // Read from cache BEFORE generateStaticParams and all rendering work.
@@ -2233,11 +2247,18 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
   // force-static and dynamic='error' are compatible with ISR — they control
   // how dynamic APIs behave during rendering, not whether results are cached.
   // Only force-dynamic truly bypasses the ISR cache.
+  // Serve prerendered/ISR-cached pages. Also check the cache when
+  // revalidateSeconds is null (statically-prerendered pages with no explicit
+  // revalidate export) so seeded build-time entries are served from cache
+  // rather than triggering a fresh render on every request.
   if (
     process.env.NODE_ENV === "production" &&
     !isForceDynamic &&
-    revalidateSeconds !== null && revalidateSeconds > 0 && revalidateSeconds !== Infinity
+    (revalidateSeconds === null || (revalidateSeconds > 0 && revalidateSeconds !== Infinity))
   ) {
+    // For static pages (no explicit revalidate) use a large TTL for
+    // Cache-Control headers; the actual entry never expires by time.
+    const __isrRevalidateSeconds = revalidateSeconds ?? 31536000;
     const __cachedPageResponse = await __readAppPageCacheResponse({
       cleanPathname,
       clearRequestContext: function() {
@@ -2250,7 +2271,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       isrHtmlKey: __isrHtmlKey,
       isrRscKey: __isrRscKey,
       isrSet: __isrSet,
-      revalidateSeconds,
+      revalidateSeconds: __isrRevalidateSeconds,
       renderFreshPageForCache: async function() {
         // Re-render the page to produce fresh HTML + RSC data for the cache
         // Use an empty headers context for background regeneration — not the original

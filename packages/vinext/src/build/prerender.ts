@@ -25,7 +25,7 @@ import type { AppRoute } from "../routing/app-router.js";
 import type { ResolvedNextConfig } from "../config/next-config.js";
 import { classifyPagesRoute, classifyAppRoute } from "./report.js";
 import { createValidFileMatcher, type ValidFileMatcher } from "../routing/file-matcher.js";
-import { NoOpCacheHandler, setCacheHandler, getCacheHandler } from "../shims/cache.js";
+import { MemoryCacheHandler, setCacheHandler, getCacheHandler } from "../shims/cache.js";
 import { runWithHeadersContext, headersContextFromRequest } from "../shims/headers.js";
 import { startProdServer } from "../server/prod-server.js";
 import { readPrerenderSecret } from "./server-manifest.js";
@@ -372,7 +372,7 @@ export async function prerenderPages({
   }
 
   const previousHandler = getCacheHandler();
-  setCacheHandler(new NoOpCacheHandler());
+  setCacheHandler(new MemoryCacheHandler());
   process.env.VINEXT_PRERENDER = "1";
   // ownedProdServerHandle: a prod server we started ourselves and must close in finally.
   // When the caller passes options._prodServer we use that and do NOT close it.
@@ -686,7 +686,12 @@ export async function prerenderApp({
   fs.mkdirSync(outDir, { recursive: true });
 
   const previousHandler = getCacheHandler();
-  setCacheHandler(new NoOpCacheHandler());
+  // Use a fresh MemoryCacheHandler (not NoOpCacheHandler) for the prerender phase.
+  // This ensures ISR entries start empty (no stale carry-over from previous
+  // builds), while still allowing fetch deduplication within individual renders.
+  // NoOpCacheHandler disables dedup too, causing identical fetches on the same
+  // page to return different values (breaking W3C trace context dedup tests).
+  setCacheHandler(new MemoryCacheHandler());
   // VINEXT_PRERENDER=1 tells the prod server to skip instrumentation.register()
   // and enable prerender-only endpoints (/__vinext/prerender/*).
   // The set/delete is wrapped in try/finally so it is always restored.

@@ -127,7 +127,7 @@ export function resolveAppPageHtmlResponsePolicy(
     };
   }
 
-  if (options.dynamicUsedDuringRender) {
+  if (options.dynamicUsedDuringRender && !options.isForceStatic) {
     return {
       cacheControl: NO_STORE_CACHE_CONTROL,
       shouldWriteToCache: false,
@@ -176,6 +176,7 @@ export function buildAppPageRscResponse(
   }
   if (options.policy.cacheState) {
     headers.set("X-Vinext-Cache", options.policy.cacheState);
+    headers.set("X-Nextjs-Cache", options.policy.cacheState);
   }
 
   if (options.middlewareContext.headers) {
@@ -215,6 +216,7 @@ export function buildAppPageHtmlResponse(
   }
   if (options.policy.cacheState) {
     headers.set("X-Vinext-Cache", options.policy.cacheState);
+    headers.set("X-Nextjs-Cache", options.policy.cacheState);
   }
   if (options.draftCookie) {
     headers.append("Set-Cookie", options.draftCookie);

@@ -88,6 +88,7 @@ export function buildAppPageCachedResponse(
     "Cache-Control": buildAppPageCacheControl(options.cacheState, options.revalidateSeconds),
     Vary: "RSC, Accept",
     "X-Vinext-Cache": options.cacheState,
+    "X-Nextjs-Cache": options.cacheState,
   };
 
   if (options.isRscRequest) {

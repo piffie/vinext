@@ -29,6 +29,7 @@ import {
   readPrerenderSecret,
 } from "./prerender.js";
 import { loadNextConfig, resolveNextConfig } from "../config/next-config.js";
+import { readBuildId } from "./server-manifest.js";
 import { pagesRouter, apiRouter } from "../routing/pages-router.js";
 import { appRouter } from "../routing/app-router.js";
 import { findDir } from "./report.js";
@@ -93,6 +94,19 @@ export type RunPrerenderOptions = {
    * Intended for tests that build to a custom outDir.
    */
   rscBundlePath?: string;
+  /**
+   * Override the output directory where prerendered HTML/RSC files are written.
+   * Defaults to `<root>/dist/server/prerendered-routes` (non-export) or
+   * `<root>/dist/client` (export).
+   * Intended for tests that build to a custom outDir.
+   */
+  outDir?: string;
+  /**
+   * Override the directory where `vinext-prerender.json` manifest is written.
+   * Defaults to `<root>/dist/server`.
+   * Intended for tests that build to a custom outDir.
+   */
+  manifestDir?: string;
 };
 
 /**
@@ -126,16 +140,27 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
 
   // The manifest lands in dist/server/ alongside the server bundle so it's
   // cleaned by Vite's emptyOutDir on rebuild and co-located with server artifacts.
-  const manifestDir = path.join(root, "dist", "server");
+  const manifestDir = options.manifestDir ?? path.join(root, "dist", "server");
 
   const loadedConfig = await resolveNextConfig(await loadNextConfig(root), root);
-  const config = options.nextConfigOverride
-    ? { ...loadedConfig, ...options.nextConfigOverride }
-    : // Note: shallow merge — nested keys like `images` or `i18n` in
-      // nextConfigOverride replace the entire nested object from loadedConfig.
-      // This is intentional for test usage (top-level overrides only); a deep
-      // merge would be needed to support partial nested overrides in the future.
-      loadedConfig;
+
+  // When `rscBundlePath` is provided, read the buildId that was baked into
+  // the compiled bundle from `vinext-server.json`. This ensures that ISR cache
+  // keys written to the prerender manifest match the keys the prod server uses
+  // at request time (both derived from the same buildId). Without this, a fresh
+  // call to resolveNextConfig would generate a new random UUID that wouldn't
+  // match the compile-time define injected into the RSC bundle.
+  const compiledBuildId = options.rscBundlePath
+    ? readBuildId(path.dirname(options.rscBundlePath))
+    : undefined;
+
+  const config = options.nextConfigOverride || compiledBuildId
+    ? {
+        ...loadedConfig,
+        ...(compiledBuildId ? { buildId: compiledBuildId } : {}),
+        ...options.nextConfigOverride,
+      }
+    : loadedConfig;
   // Activate export mode when next.config.js sets `output: 'export'`.
   // In export mode, SSR routes and any dynamic routes without static params are
   // build errors rather than silently skipped.
@@ -160,9 +185,10 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
   // output: 'export' builds use dist/client/ (handled by static-export.ts which
   // passes its own outDir — this path is only reached for non-export builds).
   const outDir =
-    mode === "export"
+    options.outDir ??
+    (mode === "export"
       ? path.join(root, "dist", "client")
-      : path.join(root, "dist", "server", "prerendered-routes");
+      : path.join(root, "dist", "server", "prerendered-routes"));
 
   const rscBundlePath = options.rscBundlePath ?? path.join(root, "dist", "server", "index.js");
   const serverDir = path.dirname(rscBundlePath);

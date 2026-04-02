@@ -783,13 +783,19 @@ async function sendWebResponse(
     // Use streaming flush modes so progressive HTML remains decodable before the
     // full response completes.
     const compressor = createCompressor(encoding!, "streaming");
-    pipeline(nodeStream, compressor, res, () => {
-      /* ignore pipeline errors on closed connections */
-    });
+    await new Promise<void>((resolve) =>
+      pipeline(nodeStream, compressor, res, () => {
+        /* ignore pipeline errors on closed connections */
+        resolve();
+      }),
+    );
   } else {
-    pipeline(nodeStream, res, () => {
-      /* ignore pipeline errors on closed connections */
-    });
+    await new Promise<void>((resolve) =>
+      pipeline(nodeStream, res, () => {
+        /* ignore pipeline errors on closed connections */
+        resolve();
+      }),
+    );
   }
 }
 
@@ -847,28 +853,40 @@ type WorkerAppRouterEntry = {
   fetch(request: Request, env?: unknown, ctx?: ExecutionContextLike): Promise<Response> | Response;
 };
 
-function createNodeExecutionContext(): ExecutionContextLike {
+type AppRouterHandlerResult = { response: Response; drain: () => Promise<void> };
+
+function createTrackedNodeExecutionContext(): { ctx: ExecutionContextLike; drain: () => Promise<void> } {
+  const pending: Promise<unknown>[] = [];
   return {
-    waitUntil(promise: Promise<unknown>) {
-      // Node doesn't provide a Workers lifecycle, but we still attach a
-      // rejection handler so background waitUntil work doesn't surface as an
-      // unhandled rejection when a Worker-style entry is used with vinext start.
-      void Promise.resolve(promise).catch(() => {});
+    ctx: {
+      waitUntil(promise: Promise<unknown>) {
+        // Track each promise so the Node.js request handler can drain them
+        // (await background cache writes) before releasing the connection.
+        pending.push(Promise.resolve(promise).catch(() => {}));
+      },
+      passThroughOnException() {},
     },
-    passThroughOnException() {},
+    drain: () => Promise.allSettled(pending).then(() => {}),
   };
 }
 
-function resolveAppRouterHandler(entry: unknown): (request: Request) => Promise<Response> {
+function resolveAppRouterHandler(entry: unknown): (request: Request) => Promise<AppRouterHandlerResult> {
   if (typeof entry === "function") {
-    return (request) => Promise.resolve(entry(request));
+    return async (request) => {
+      const { ctx, drain } = createTrackedNodeExecutionContext();
+      const response = await Promise.resolve((entry as (r: Request, ctx: ExecutionContextLike) => Promise<Response>)(request, ctx));
+      return { response, drain };
+    };
   }
 
   if (entry && typeof entry === "object" && "fetch" in entry) {
     const workerEntry = entry as WorkerAppRouterEntry;
     if (typeof workerEntry.fetch === "function") {
-      return (request) =>
-        Promise.resolve(workerEntry.fetch(request, undefined, createNodeExecutionContext()));
+      return async (request) => {
+        const { ctx, drain } = createTrackedNodeExecutionContext();
+        const response = await Promise.resolve(workerEntry.fetch(request, undefined, ctx));
+        return { response, drain };
+      };
     }
   }
 
@@ -1045,10 +1063,18 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
 
       // Convert Node.js request to Web Request and call the RSC handler
       const request = nodeToWebRequest(req, normalizedUrl);
-      const response = await rscHandler(request);
+      const { response, drain } = await rscHandler(request);
 
-      // Stream the Web Response back to the Node.js response
+      // Stream the Web Response back to the Node.js response.
+      // sendWebResponse awaits the pipeline so the response body is fully
+      // sent before we drain waitUntil promises (e.g. ISR cache writes).
       await sendWebResponse(response, req, res, compress);
+
+      // Drain any background work (cache writes) registered via waitUntil.
+      // On Node.js there is no platform-managed lifecycle, so we await them
+      // here — AFTER the pipeline — to ensure the ISR cache is populated
+      // before the next request for the same route arrives.
+      await drain();
     } catch (e) {
       console.error("[vinext] Server error:", e);
       if (!res.headersSent) {

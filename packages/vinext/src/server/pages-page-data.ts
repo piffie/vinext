@@ -157,6 +157,7 @@ function buildPagesCacheResponse(
   const headers: Record<string, string> = {
     "Content-Type": "text/html",
     "X-Vinext-Cache": cacheState,
+    "X-Nextjs-Cache": cacheState,
     "Cache-Control":
       cacheState === "HIT"
         ? `s-maxage=${revalidateSeconds ?? 60}, stale-while-revalidate`

@@ -3342,7 +3342,16 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
             const outDir = options.dir;
             if (!outDir) return;
 
-            const manifest = { prerenderSecret };
+            const manifest: Record<string, string> = { prerenderSecret };
+            // Include the buildId so the prerender phase (run-prerender.ts)
+            // can use the exact same buildId that was baked into the compiled
+            // RSC bundle via Vite's `define`. If the prerender phase loaded
+            // next.config.js independently it would generate a new random UUID
+            // that wouldn't match the compiled-in buildId, causing ISR cache
+            // keys set by seedMemoryCacheFromPrerender to never match the keys
+            // the prod server looks up at request time.
+            const bid = nextConfig?.buildId;
+            if (bid) manifest.buildId = bid;
             fs.writeFileSync(path.join(outDir, "vinext-server.json"), JSON.stringify(manifest));
           },
         },

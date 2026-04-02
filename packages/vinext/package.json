@@ -33,6 +33,10 @@
       "types": "./dist/server/prod-server.d.ts",
       "import": "./dist/server/prod-server.js"
     },
+    "./build/run-prerender": {
+      "types": "./dist/build/run-prerender.d.ts",
+      "import": "./dist/build/run-prerender.js"
+    },
     "./cloudflare": {
       "types": "./dist/cloudflare/index.d.ts",
       "import": "./dist/cloudflare/index.js"

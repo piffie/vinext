@@ -65,6 +65,7 @@ export function buildRouteHandlerCachedResponse(
     }
   }
   headers.set("X-Vinext-Cache", options.cacheState);
+  headers.set("X-Nextjs-Cache", options.cacheState);
   headers.set(
     "Cache-Control",
     buildRouteHandlerCacheControl(options.cacheState, options.revalidateSeconds),
@@ -85,6 +86,7 @@ export function applyRouteHandlerRevalidateHeader(
 
 export function markRouteHandlerCacheMiss(response: Response): void {
   response.headers.set("X-Vinext-Cache", "MISS");
+  response.headers.set("X-Nextjs-Cache", "MISS");
 }
 
 export async function buildAppRouteCacheValue(response: Response): Promise<CachedRouteValue> {

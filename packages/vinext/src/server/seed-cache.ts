@@ -104,11 +104,31 @@ export async function seedMemoryCacheFromPrerender(serverDir: string): Promise<n
 // ─── Internals ────────────────────────────────────────────────────────────────
 
 /**
- * Build the CacheHandler context object from a revalidate value.
- * `revalidate: undefined` (static routes) → empty context → no expiry.
+ * Build the CacheHandler context object from a revalidate value and pathname.
+ * Includes the implicit path-based cache tags that `revalidatePath()` targets,
+ * so seeded entries are invalidated correctly when `revalidatePath()` is called.
+ *
+ * `revalidate: undefined` (static routes) → no expiry.
  */
-function revalidateCtx(seconds: number | undefined): Record<string, unknown> {
-  return seconds !== undefined ? { revalidate: seconds } : {};
+function revalidateCtx(seconds: number | undefined, pathname: string): Record<string, unknown> {
+  // Generate the same implicit path tags as __pageCacheTags in app-rsc-entry.ts
+  const tags: string[] = [pathname, `_N_T_${pathname}`];
+  tags.push("_N_T_/layout");
+  const segments = pathname.split("/");
+  let built = "";
+  for (let i = 1; i < segments.length; i++) {
+    if (segments[i]) {
+      built += "/" + segments[i];
+      tags.push(`_N_T_${built}/layout`);
+    }
+  }
+  tags.push(`_N_T_${built}/page`);
+
+  const ctx: Record<string, unknown> = { tags };
+  if (seconds !== undefined) {
+    ctx.revalidate = seconds;
+  }
+  return ctx;
 }
 
 /**
@@ -137,7 +157,7 @@ async function seedHtml(
   };
 
   const key = baseKey + ":html";
-  await handler.set(key, htmlValue, revalidateCtx(revalidateSeconds));
+  await handler.set(key, htmlValue, revalidateCtx(revalidateSeconds, pathname));
 
   if (revalidateSeconds !== undefined) {
     setRevalidateDuration(key, revalidateSeconds);
@@ -175,7 +195,7 @@ async function seedRsc(
   };
 
   const key = baseKey + ":rsc";
-  await handler.set(key, rscValue, revalidateCtx(revalidateSeconds));
+  await handler.set(key, rscValue, revalidateCtx(revalidateSeconds, pathname));
 
   if (revalidateSeconds !== undefined) {
     setRevalidateDuration(key, revalidateSeconds);

@@ -493,15 +493,46 @@ const skipMatchers = lookup(relPath.split("/")) ?? new Set<string>();
 
 // ─── Matcher logic ────────────────────────────────────────────────────────────
 
+const _testMode = process.env.NEXT_TEST_MODE ?? "dev";
+
+/** Test whether a single leaf matcher string matches a test name. */
+function matchesMatcher(name: string, matcher: string): boolean {
+  if (matcher === "*") return true;
+  if (matcher.startsWith("$contains:")) return name.includes(matcher.slice("$contains:".length));
+  return name === matcher;
+}
+
 function shouldSkip(name: string): boolean {
-  if (skipMatchers.has("*")) return true;
-  if (skipMatchers.has(name)) return true;
   for (const matcher of skipMatchers) {
-    if (matcher.startsWith("$contains:") && name.includes(matcher.slice("$contains:".length))) {
-      return true;
+    let effective = matcher;
+
+    // Mode-gated prefixes: only apply when the current mode matches.
+    if (matcher.startsWith("$mode_start:")) {
+      if (_testMode !== "start") continue;
+      effective = matcher.slice("$mode_start:".length);
+    } else if (matcher.startsWith("$mode_dev:")) {
+      if (_testMode !== "dev") continue;
+      effective = matcher.slice("$mode_dev:".length);
     }
+
+    if (matchesMatcher(name, effective)) return true;
   }
   return false;
+}
+
+/**
+ * Expand an it.each template string for a given row object.
+ * Vitest replaces `$key` with `'stringValue'` (single-quoted) or the raw
+ * string representation for non-strings.
+ */
+function expandEachTemplate(template: string, row: unknown): string {
+  if (typeof row !== "object" || row === null || Array.isArray(row)) return template;
+  return template.replace(/\$([\w.]+)/g, (match, key) => {
+    const val = (row as Record<string, unknown>)[key];
+    if (val === undefined) return match;
+    if (typeof val === "string") return `'${val}'`;
+    return String(val);
+  });
 }
 
 // ─── Wrap it / test ───────────────────────────────────────────────────────────
@@ -528,13 +559,54 @@ function wrapRunner(runner: typeof it): typeof it {
       if (prop === "each" && typeof value === "function") {
         // oxlint-disable-next-line typescript/no-explicit-any
         return (...tableArgs: any[]) => {
+          // For per-row skip matching, we need the raw table of objects.
+          const rawTable: unknown[] | null =
+            Array.isArray(tableArgs[0]) && tableArgs.length === 1 ? tableArgs[0] : null;
+
           // oxlint-disable-next-line typescript/no-explicit-any
           const registrar = (value as any).call(target, ...tableArgs);
           if (typeof registrar !== "function") return registrar;
           // oxlint-disable-next-line typescript/no-explicit-any
-          const wrapped = (name: string, ...rest: any[]) => {
-            if (shouldSkip(name)) return runner.skip(name, ...rest);
-            return registrar(name, ...rest);
+          const wrapped = (name: string, fn: unknown, ...rest: any[]) => {
+            if (shouldSkip(name)) return runner.skip(name, fn as any, ...rest);
+
+            // For object-row tables, also check per-row expanded names so that
+            // individual it.each variants can be skipped without skipping the
+            // whole parameterised group.
+            if (
+              rawTable &&
+              rawTable.length > 0 &&
+              typeof rawTable[0] === "object" &&
+              !Array.isArray(rawTable[0])
+            ) {
+              const keepRows: unknown[] = [];
+              const skipRows: unknown[] = [];
+              for (const row of rawTable) {
+                if (shouldSkip(expandEachTemplate(name, row))) skipRows.push(row);
+                else keepRows.push(row);
+              }
+
+              if (skipRows.length > 0 && keepRows.length === 0) {
+                // All rows skipped — use the template-level skip.
+                return runner.skip(name, fn as any, ...rest);
+              }
+
+              if (skipRows.length > 0) {
+                // Some rows skipped — register each skipped row individually,
+                // then run the remaining rows with a filtered table.
+                for (const row of skipRows) {
+                  runner.skip(expandEachTemplate(name, row), fn as any);
+                }
+                // oxlint-disable-next-line typescript/no-explicit-any
+                const filteredRegistrar = (value as any).call(target, keepRows);
+                if (typeof filteredRegistrar === "function") {
+                  return filteredRegistrar(name, fn, ...rest);
+                }
+                return;
+              }
+            }
+
+            return registrar(name, fn, ...rest);
           };
           // Preserve .skip/.only on the returned registrar as well.
           return Object.assign(wrapped, registrar);

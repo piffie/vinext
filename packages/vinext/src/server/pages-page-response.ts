@@ -275,6 +275,7 @@ export async function renderPagesPageResponse(
       `s-maxage=${options.isrRevalidateSeconds}, stale-while-revalidate`,
     );
     responseHeaders.set("X-Vinext-Cache", "MISS");
+    responseHeaders.set("X-Nextjs-Cache", "MISS");
   }
   if (options.fontLinkHeader) {
     responseHeaders.set("Link", options.fontLinkHeader);

@@ -12,7 +12,6 @@
         "should not cache request if response data size is greater than 2MB and FetchCache is possible in development mode",
 
         "should bailout to client rendering - with suspense boundary",
-        "$mode_start:should honor fetch cache correctly",
         "$mode_start:should propagate unstable_cache tags correctly",
         "$mode_start:unstable-cache should work in pages'/api/unstable-cache-node'",
         "$mode_start:unstable-cache should work in pages'/api/unstable-cache-edge'",

@@ -475,6 +475,7 @@ function __pageCacheTags(pathname, extraTags) {
 // headers — but that case is already prevented by the dynamic-usage opt-out.
 // TODO: capture render-time response headers for full Next.js parity.
 const __pendingRegenerations = new Map();
+const __edgeForceStaticWarned = new Set();
 function __triggerBackgroundRegeneration(key, renderFn) {
   if (__pendingRegenerations.has(key)) return;
   const promise = renderFn()
@@ -2190,6 +2191,13 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     [...(route.layouts || [])].reverse().find(l => l?.dynamicParams !== undefined)?.dynamicParams; // true (default) | false
   const isForceStatic = dynamicConfig === "force-static";
   const isDynamicError = dynamicConfig === "error";
+
+  // Warn once per process when a page combines runtime='edge' with dynamic='force-static'.
+  // These two options are incompatible — edge routes cannot be statically rendered.
+  if (isForceStatic && route.page?.runtime === "edge" && !__edgeForceStaticWarned.has(route.pattern)) {
+    __edgeForceStaticWarned.add(route.pattern);
+    console.warn(\`Page "\${route.pattern}" is using runtime = 'edge' which is currently incompatible with dynamic = 'force-static'. Please remove either "runtime" or "force-static" for correct behavior\`);
+  }
 
   // force-static: replace headers/cookies context with empty values and
   // clear searchParams so dynamic APIs return defaults instead of real data

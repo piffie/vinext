@@ -1535,7 +1535,15 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     }
   }
 
-  const isRscRequest = pathname.endsWith(".rsc") || request.headers.get("accept")?.includes("text/x-component");
+  // isRscRequest: client wants RSC payload (affects response format and pages fallback).
+  // - .rsc suffix: explicit RSC payload request — pages cannot respond to these.
+  // - Accept: text/x-component: explicit RSC content-type request — same.
+  // - rsc: 1 header alone (without the above): App Router client marker. Pages routes
+  //   CAN respond to these with HTML; the client accepts HTML from pages routes.
+  //   We still treat rsc:1 as RSC for response-format purposes (Content-Type) when
+  //   an app route matches, but DO allow pages fallback (see !isExplicitRscPayload below).
+  const isExplicitRscPayload = pathname.endsWith(".rsc") || request.headers.get("accept")?.includes("text/x-component");
+  const isRscRequest = isExplicitRscPayload || request.headers.get("rsc") === "1";
   let cleanPathname = pathname.replace(/\\.rsc$/, "");
   // Preserve the user-visible (canonical) pathname before any internal rewrites.
   // usePathname() should always return the URL the user navigated to, not the
@@ -1889,8 +1897,8 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
         setHeadersContext(null);
         setNavigationContext(null);
         const redirectHeaders = new Headers({
-          "Content-Type": "text/x-component; charset=utf-8",
-          "Vary": "RSC, Accept",
+          "Content-Type": "text/x-component",
+          "Vary": "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
           "x-action-redirect": actionRedirect.url,
           "x-action-redirect-type": actionRedirect.type,
           "x-action-redirect-status": String(actionRedirect.status),
@@ -1937,7 +1945,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       const actionPendingCookies = getAndClearPendingCookies();
       const actionDraftCookie = getDraftModeCookieHeader();
 
-      const actionHeaders = { "Content-Type": "text/x-component; charset=utf-8", "Vary": "RSC, Accept" };
+      const actionHeaders = { "Content-Type": "text/x-component", "Vary": "RSC, Accept" };
       const actionResponse = new Response(rscStream, { headers: actionHeaders });
       if (actionPendingCookies.length > 0 || actionDraftCookie) {
         for (const cookie of actionPendingCookies) {
@@ -2002,9 +2010,11 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
     // When a request doesn't match any App Router route, delegate to the
     // Pages Router handler (available in the SSR environment). This covers
     // both production request serving and prerender fetches from wrangler.
-    // RSC requests (.rsc suffix or Accept: text/x-component) cannot be
+    // Explicit RSC payload requests (.rsc suffix or Accept: text/x-component) cannot be
     // handled by the Pages Router, so skip the delegation for those.
-    if (!isRscRequest) {
+    // rsc:1 requests (App Router client marker) CAN fall through to pages — pages
+    // routes respond with HTML and the App Router client accepts that.
+    if (!isExplicitRscPayload) {
       const __pagesEntry = await import.meta.viteRsc.loadModule("ssr", "index");
       // Check Pages Router API routes first (paths under /api/…)
       if (
@@ -2440,7 +2450,7 @@ async function _handleRequest(request, __reqCtx, _mwCtx) {
       // context to still be live. The AsyncLocalStorage scope from runWithRequestContext
       // handles cleanup naturally when all async continuations complete.
       return new Response(interceptStream, {
-        headers: { "Content-Type": "text/x-component; charset=utf-8", "Vary": "RSC, Accept" },
+        headers: { "Content-Type": "text/x-component", "Vary": "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept" },
       });
     },
     searchParams: url.searchParams,

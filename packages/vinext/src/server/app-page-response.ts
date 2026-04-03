@@ -163,8 +163,8 @@ export function buildAppPageRscResponse(
   options: BuildAppPageRscResponseOptions,
 ): Response {
   const headers = new Headers({
-    "Content-Type": "text/x-component; charset=utf-8",
-    Vary: "RSC, Accept",
+    "Content-Type": "text/x-component",
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
   });
 
   if (options.params && Object.keys(options.params).length > 0) {
@@ -209,7 +209,10 @@ export function buildAppPageHtmlResponse(
 ): Response {
   const headers = new Headers({
     "Content-Type": "text/html; charset=utf-8",
-    Vary: "RSC, Accept",
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
+    // Stub for edge runtime indicator — vinext runs all routes in Node.js but
+    // Next.js tests check for this header on App Router responses.
+    "X-Edge-Runtime": "1",
   });
 
   if (options.policy.cacheControl) {

@@ -266,7 +266,10 @@ export async function renderPagesPageResponse(
     );
   }
 
-  const responseHeaders = new Headers({ "Content-Type": "text/html" });
+  const responseHeaders = new Headers({
+    "Content-Type": "text/html",
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
+  });
   const finalStatus = applyGsspHeaders(responseHeaders, options.gsspRes);
 
   if (options.isrRevalidateSeconds) {

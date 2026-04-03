@@ -138,7 +138,7 @@ export async function renderAppPageHtmlResponse(
 
   const headers: Record<string, string> = {
     "Content-Type": "text/html; charset=utf-8",
-    Vary: "RSC, Accept",
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
   };
 
   if (options.fontLinkHeader) {

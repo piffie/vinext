@@ -418,6 +418,28 @@ expect.extend({
           : `expected ${JSON.stringify(received)} to include all members ${JSON.stringify(expected)}`,
     };
   },
+
+  toStartWith(received: string, expected: string) {
+    const pass = typeof received === "string" && received.startsWith(expected);
+    return {
+      pass,
+      message: () =>
+        pass
+          ? `expected string not to start with "${expected}"`
+          : `expected "${received}" to start with "${expected}"`,
+    };
+  },
+
+  toEndWith(received: string, expected: string) {
+    const pass = typeof received === "string" && received.endsWith(expected);
+    return {
+      pass,
+      message: () =>
+        pass
+          ? `expected string not to end with "${expected}"`
+          : `expected "${received}" to end with "${expected}"`,
+    };
+  },
 });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -531,6 +553,7 @@ function expandEachTemplate(template: string, row: unknown): string {
     const val = (row as Record<string, unknown>)[key];
     if (val === undefined) return match;
     if (typeof val === "string") return `'${val}'`;
+    // oxlint-disable-next-line typescript/no-base-to-string
     return String(val);
   });
 }
@@ -568,7 +591,8 @@ function wrapRunner(runner: typeof it): typeof it {
           if (typeof registrar !== "function") return registrar;
           // oxlint-disable-next-line typescript/no-explicit-any
           const wrapped = (name: string, fn: unknown, ...rest: any[]) => {
-            if (shouldSkip(name)) return runner.skip(name, fn as any, ...rest);
+            // oxlint-disable-next-line typescript/no-explicit-any
+            if (shouldSkip(name)) return runner.skip(name, fn as unknown as any, ...rest);
 
             // For object-row tables, also check per-row expanded names so that
             // individual it.each variants can be skipped without skipping the
@@ -588,14 +612,16 @@ function wrapRunner(runner: typeof it): typeof it {
 
               if (skipRows.length > 0 && keepRows.length === 0) {
                 // All rows skipped — use the template-level skip.
-                return runner.skip(name, fn as any, ...rest);
+                // oxlint-disable-next-line typescript/no-explicit-any
+                return runner.skip(name, fn as unknown as any, ...rest);
               }
 
               if (skipRows.length > 0) {
                 // Some rows skipped — register each skipped row individually,
                 // then run the remaining rows with a filtered table.
                 for (const row of skipRows) {
-                  runner.skip(expandEachTemplate(name, row), fn as any);
+                  // oxlint-disable-next-line typescript/no-explicit-any
+                  runner.skip(expandEachTemplate(name, row), fn as unknown as any);
                 }
                 // oxlint-disable-next-line typescript/no-explicit-any
                 const filteredRegistrar = (value as any).call(target, keepRows);

@@ -184,7 +184,10 @@ export async function renderAppPageBoundaryResponse<TElement>(
     // their ALS-backed state while the stream is being read.
     return new Response(rscStream, {
       status: options.status,
-      headers: { "Content-Type": "text/x-component; charset=utf-8", Vary: "RSC, Accept" },
+      headers: {
+        "Content-Type": "text/x-component",
+        Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
+      },
     });
   }
 

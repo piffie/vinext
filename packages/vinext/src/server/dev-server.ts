@@ -164,6 +164,10 @@ async function streamPageToResponse(
   const headers: Record<string, string> = {
     "Content-Type": "text/html",
     "Transfer-Encoding": "chunked",
+    // Include RSC vary tokens so flight-request responses carry the correct
+    // caching hints.  writeHead() takes precedence over any Vary: Origin
+    // that the Vite CORS middleware may have set via res.setHeader() earlier.
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept, Accept-Encoding",
   };
   if (extraHeaders) {
     for (const [key, val] of Object.entries(extraHeaders)) {

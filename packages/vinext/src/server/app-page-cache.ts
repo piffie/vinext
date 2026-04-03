@@ -146,7 +146,7 @@ export function buildAppPageCachedResponse(
   const status = cachedValue.status || 200;
   const headers = {
     "Cache-Control": buildAppPageCacheControl(options.cacheState, options.revalidateSeconds),
-    Vary: "RSC, Accept",
+    Vary: "RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept",
     "X-Vinext-Cache": options.cacheState,
     "X-Nextjs-Cache": options.cacheState,
   };
@@ -159,7 +159,7 @@ export function buildAppPageCachedResponse(
     return new Response(cachedValue.rscData, {
       status,
       headers: {
-        "Content-Type": "text/x-component; charset=utf-8",
+        "Content-Type": "text/x-component",
         ...headers,
       },
     });

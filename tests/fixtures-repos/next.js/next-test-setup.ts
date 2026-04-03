@@ -1435,6 +1435,7 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
   let _server: ViteDevServer | null = null;
   let _baseUrl = "";
   let _cliOutput = "";
+  let _origCwd: string | null = null;
 
   const viteConfig = buildViteConfig(opts.files, (msg) => {
     _cliOutput += msg + "\n";
@@ -1442,6 +1443,11 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
 
   async function _doStart() {
     if (_server) return;
+    // Set process.cwd() to the fixture root so that pages using process.cwd()
+    // to locate data files (e.g. app/dashboard/deployments/[id]/data.json)
+    // resolve them correctly. Restored in _doStop().
+    _origCwd = process.cwd();
+    process.chdir(opts.files);
     _server = await createServer(viteConfig);
 
     // Capture console.warn / console.error from server-side module execution
@@ -1527,6 +1533,10 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
     await _server?.close();
     _server = null;
     _baseUrl = "";
+    if (_origCwd) {
+      process.chdir(_origCwd);
+      _origCwd = null;
+    }
   }
 
   const next = makeNextInstance(

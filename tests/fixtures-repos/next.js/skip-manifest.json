@@ -19,7 +19,8 @@
         "$mode_start:should stream properly for '/stale-cache-serving-edge/app-page'"
       ],
       "*": ["*"]
-    }
+    },
+    "*": ["*"]
   },
   "*": ["*"]
 }

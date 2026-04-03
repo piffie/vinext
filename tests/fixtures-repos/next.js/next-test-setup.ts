@@ -401,26 +401,28 @@ async function makeBrowserInstance(
         // because CDP navigation treats pushState entries as cross-document and triggers
         // a full page reload, breaking SPA back-navigation that should fire popstate.
         void page.evaluate(() => window.history.back()).catch(() => {});
-        await page.waitForFunction(
-          (prev: string) => window.location.href !== prev,
-          currentHref,
-          { timeout: 15_000 },
-        );
+        await page.waitForFunction((prev: string) => window.location.href !== prev, currentHref, {
+          timeout: 15_000,
+        });
       })();
-      return makeVoidHandle(p.then(() => undefined as void), page);
+      return makeVoidHandle(
+        p.then(() => undefined as void),
+        page,
+      );
     },
 
     forward() {
       const p = (async () => {
         const currentHref = await page.evaluate(() => window.location.href);
         void page.evaluate(() => window.history.forward()).catch(() => {});
-        await page.waitForFunction(
-          (prev: string) => window.location.href !== prev,
-          currentHref,
-          { timeout: 15_000 },
-        );
+        await page.waitForFunction((prev: string) => window.location.href !== prev, currentHref, {
+          timeout: 15_000,
+        });
       })();
-      return makeVoidHandle(p.then(() => undefined as void), page);
+      return makeVoidHandle(
+        p.then(() => undefined as void),
+        page,
+      );
     },
 
     refresh() {
@@ -1310,6 +1312,17 @@ async function createNextDevServer(opts: NextTestSetupOptions): Promise<NextInst
         const resp = new Response(Math.random().toString(), {
           status: 200,
           headers: { "content-type": "text/plain" },
+        });
+        Object.defineProperty(resp, "url", { get: () => url, configurable: true });
+        return resp;
+      }
+      // Mock api/delay* calls — these artificially delay responses by ?delay=N ms.
+      // Without mocking, the priming request in stale-cache-serving tests waits for
+      // a real 3-second network round-trip to Vercel, adding 3s to each test run.
+      if (url.startsWith("https://next-data-api-endpoint.vercel.app/api/delay")) {
+        const resp = new Response(JSON.stringify({ random: Math.random() }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
         });
         Object.defineProperty(resp, "url", { get: () => url, configurable: true });
         return resp;

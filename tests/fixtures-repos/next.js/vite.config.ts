@@ -13,6 +13,14 @@ export default defineConfig({
       "next-test-utils": join(import.meta.dirname, "./next-test-utils.js"),
     },
 
+    // Exclude fixture files that use CJS `require('./foo.test')` to re-run
+    // another test file with different env vars. vite-node's require shim
+    // falls back to Node.js CJS for the required file's transitive ESM
+    // imports, which can't resolve Vite aliases (e.g. 'e2e-utils'). These
+    // files are covered by the skip-manifest "*": ["*"] wildcard anyway —
+    // excluding them produces the same outcome without the load-time crash.
+    exclude: ["**/*-custom-handler.test.*", "**/node_modules/**"],
+
     fileParallelism: false,
     testTimeout: 30_000,
     globals: true,

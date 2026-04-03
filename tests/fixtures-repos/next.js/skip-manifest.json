@@ -21,11 +21,11 @@
         "$mode_start:should output HTML/RSC files for static paths",
         "$mode_start:should have correct prerender-manifest entries",
 
+        "$mode_start:should load data only at build time even if response data size is greater than 2MB and FetchCache is possible",
         "$mode_start:should log fetch metrics to the diagnostics directory",
         "$mode_start:should have correct cache tags for prerendered path",
         "$mode_start:should correctly error and not update cache for ISR",
         "$mode_start:should stream properly for '/stale-cache-serving-edge/app-page'",
-        "$mode_start:should load data only at build time even if response data size is greater than 2MB and FetchCache is possible",
         "$mode_start:should successfully update tag when called from server action"
       ],
       "*": ["*"]

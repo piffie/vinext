@@ -913,31 +913,6 @@ function createPatchedFetch(): typeof globalThis.fetch {
       const cloned = response.clone();
       const body = await cloned.text();
 
-      // Enforce 2MB response body limit — larger items must not be cached.
-      const MAX_RESPONSE_CACHE_BYTES = 2 * 1024 * 1024;
-      if (Buffer.byteLength(body, "utf8") > MAX_RESPONSE_CACHE_BYTES) {
-        const fetchUrl =
-          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        console.warn(
-          `Failed to set Next.js data cache for ${fetchUrl}, items over 2MB can not be cached`,
-        );
-        // The clone was consumed above; return a fresh Response built from the
-        // body string so the original response is not passed into the RSC
-        // pipeline where its stream lifecycle can cause backpressure issues.
-        const responseHeaders: Record<string, string> = {};
-        response.headers.forEach((v, k) => {
-          responseHeaders[k] = v;
-        });
-        const oversizeRes = new Response(body, {
-          status: response.status,
-          headers: responseHeaders,
-        });
-        if (response.url) {
-          Object.defineProperty(oversizeRes, "url", { value: response.url, configurable: true });
-        }
-        return oversizeRes;
-      }
-
       const headers: Record<string, string> = {};
       cloned.headers.forEach((v, k) => {
         // Never cache Set-Cookie headers — they are per-user and must not

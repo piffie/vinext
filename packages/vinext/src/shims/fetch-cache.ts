@@ -930,6 +930,18 @@ function createPatchedFetch(): typeof globalThis.fetch {
       const cloned = response.clone();
       const body = await cloned.text();
 
+      // Next.js refuses to cache responses over 2MB in development mode.
+      // Warn and skip caching to match the upstream behavior.
+      const DEV_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+      if (process.env.NODE_ENV !== "production" && body.length > DEV_CACHE_MAX_BYTES) {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        console.warn(
+          `Failed to set Next.js data cache for ${url}, items over 2MB can not be cached`,
+        );
+        return response;
+      }
+
       const headers: Record<string, string> = {};
       cloned.headers.forEach((v, k) => {
         // Never cache Set-Cookie headers — they are per-user and must not

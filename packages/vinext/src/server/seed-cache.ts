@@ -49,6 +49,8 @@ type PrerenderManifestRoute = {
   revalidate?: number | false;
   path?: string;
   router?: "app" | "pages";
+  /** Extra ISR cache tags (e.g. unstable_cache tags) stored during prerender. */
+  tags?: string[];
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -89,11 +91,20 @@ export async function seedMemoryCacheFromPrerender(serverDir: string): Promise<n
     const pathname = route.path ?? route.route;
     const baseKey = isrCacheKey("app", pathname, buildId);
     const revalidateSeconds = typeof route.revalidate === "number" ? route.revalidate : undefined;
+    const extraTags = route.tags;
 
     if (
-      await seedHtml(handler, prerenderDir, baseKey, pathname, trailingSlash, revalidateSeconds)
+      await seedHtml(
+        handler,
+        prerenderDir,
+        baseKey,
+        pathname,
+        trailingSlash,
+        revalidateSeconds,
+        extraTags,
+      )
     ) {
-      await seedRsc(handler, prerenderDir, baseKey, pathname, revalidateSeconds);
+      await seedRsc(handler, prerenderDir, baseKey, pathname, revalidateSeconds, extraTags);
       seeded++;
     }
   }
@@ -106,11 +117,16 @@ export async function seedMemoryCacheFromPrerender(serverDir: string): Promise<n
 /**
  * Build the CacheHandler context object from a revalidate value and pathname.
  * Includes the implicit path-based cache tags that `revalidatePath()` targets,
- * so seeded entries are invalidated correctly when `revalidatePath()` is called.
+ * plus any extra tags (e.g. unstable_cache tags) from the prerender manifest,
+ * so seeded entries are invalidated correctly by revalidatePath()/revalidateTag().
  *
  * `revalidate: undefined` (static routes) → no expiry.
  */
-function revalidateCtx(seconds: number | undefined, pathname: string): Record<string, unknown> {
+function revalidateCtx(
+  seconds: number | undefined,
+  pathname: string,
+  extraTags?: string[],
+): Record<string, unknown> {
   // Generate the same implicit path tags as __pageCacheTags in app-rsc-entry.ts
   const tags: string[] = [pathname, `_N_T_${pathname}`];
   tags.push("_N_T_/layout");
@@ -123,6 +139,13 @@ function revalidateCtx(seconds: number | undefined, pathname: string): Record<st
     }
   }
   tags.push(`_N_T_${built}/page`);
+
+  // Merge in extra tags from the prerender manifest (unstable_cache tags, etc.)
+  if (extraTags) {
+    for (const t of extraTags) {
+      if (!tags.includes(t)) tags.push(t);
+    }
+  }
 
   const ctx: Record<string, unknown> = { tags };
   if (seconds !== undefined) {
@@ -142,6 +165,7 @@ async function seedHtml(
   pathname: string,
   trailingSlash: boolean,
   revalidateSeconds: number | undefined,
+  extraTags?: string[],
 ): Promise<boolean> {
   const relPath = getOutputPath(pathname, trailingSlash);
   const fullPath = path.join(prerenderDir, relPath);
@@ -157,7 +181,7 @@ async function seedHtml(
   };
 
   const key = baseKey + ":html";
-  await handler.set(key, htmlValue, revalidateCtx(revalidateSeconds, pathname));
+  await handler.set(key, htmlValue, revalidateCtx(revalidateSeconds, pathname, extraTags));
 
   if (revalidateSeconds !== undefined) {
     setRevalidateDuration(key, revalidateSeconds);
@@ -176,6 +200,7 @@ async function seedRsc(
   baseKey: string,
   pathname: string,
   revalidateSeconds: number | undefined,
+  extraTags?: string[],
 ): Promise<void> {
   const relPath = getRscOutputPath(pathname);
   const fullPath = path.join(prerenderDir, relPath);
@@ -195,7 +220,7 @@ async function seedRsc(
   };
 
   const key = baseKey + ":rsc";
-  await handler.set(key, rscValue, revalidateCtx(revalidateSeconds, pathname));
+  await handler.set(key, rscValue, revalidateCtx(revalidateSeconds, pathname, extraTags));
 
   if (revalidateSeconds !== undefined) {
     setRevalidateDuration(key, revalidateSeconds);

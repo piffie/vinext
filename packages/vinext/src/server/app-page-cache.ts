@@ -1,6 +1,66 @@
 import type { CachedAppPageValue } from "../shims/cache.js";
 import { buildAppPageCacheValue, type ISRCacheEntry } from "./isr-cache.js";
 
+// ---------------------------------------------------------------------------
+// Prerender tag sidecar
+//
+// During a production build's prerender phase, the RSC handler renders each
+// page and calls finalizeAppPageHtmlCacheResponse(). At that point we eagerly
+// capture the page's ISR cache tags (which include unstable_cache tags that
+// were registered synchronously via _addCollectedFetchTags before any await).
+//
+// The prerender code (prerender.ts) reads these tags via consumePrerenderPageTags()
+// after calling rscHandler(), and writes them to the vinext-prerender.json
+// manifest. seedMemoryCacheFromPrerender() then uses the manifest tags so that
+// seeded ISR entries are invalidated correctly by revalidateTag/updateTag.
+// ---------------------------------------------------------------------------
+
+const _PRERENDER_TAGS_KEY = Symbol.for("vinext.prerenderPageTags");
+const _gPrerender = globalThis as Record<PropertyKey, unknown>;
+
+function _getPrerenderTagsMap(): Map<string, string[]> {
+  return (_gPrerender[_PRERENDER_TAGS_KEY] ??= new Map()) as Map<string, string[]>;
+}
+
+/**
+ * Enable tag collection for the current prerender phase.
+ * Call this from prerender.ts before starting renders.
+ * Has no effect if collection is already active.
+ */
+export function enablePrerenderTagCollection(): void {
+  if (!_gPrerender[_PRERENDER_TAGS_KEY]) {
+    _gPrerender[_PRERENDER_TAGS_KEY] = new Map();
+  }
+}
+
+/**
+ * Store the ISR tags for a prerendered page.
+ * No-op unless enablePrerenderTagCollection() was called first.
+ * Called from renderAppPageLifecycle() after renderToReadableStream() so that
+ * synchronously-registered unstable_cache tags are captured for all pages,
+ * including speculative static pages that don't write to the ISR cache.
+ */
+export function recordPrerenderPageTags(pathname: string, tags: string[]): void {
+  // Only store if prerender collection was explicitly enabled.
+  // This prevents memory leaks in live production renders.
+  const map = _gPrerender[_PRERENDER_TAGS_KEY] as Map<string, string[]> | undefined;
+  if (map) {
+    map.set(pathname, tags);
+  }
+}
+
+/**
+ * Consume (read + delete) the ISR tags recorded for a page during prerender.
+ * Returns an empty array if no tags were recorded for the given pathname.
+ */
+export function consumePrerenderPageTags(pathname: string): string[] {
+  const map = _gPrerender[_PRERENDER_TAGS_KEY] as Map<string, string[]> | undefined;
+  if (!map) return [];
+  const tags = map.get(pathname);
+  map.delete(pathname);
+  return tags ?? [];
+}
+
 type AppPageDebugLogger = (event: string, detail: string) => void;
 type AppPageCacheGetter = (key: string) => Promise<ISRCacheEntry | null>;
 type AppPageCacheSetter = (

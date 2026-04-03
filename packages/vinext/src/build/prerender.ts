@@ -29,6 +29,10 @@ import { MemoryCacheHandler, setCacheHandler, getCacheHandler } from "../shims/c
 import { runWithHeadersContext, headersContextFromRequest } from "../shims/headers.js";
 import { startProdServer } from "../server/prod-server.js";
 import { readPrerenderSecret } from "./server-manifest.js";
+import {
+  consumePrerenderPageTags,
+  enablePrerenderTagCollection,
+} from "../server/app-page-cache.js";
 export { readPrerenderSecret } from "./server-manifest.js";
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
@@ -53,6 +57,12 @@ export type PrerenderRouteResult =
       path?: string;
       /** Which router produced this route. Used by cache seeding. */
       router: "app" | "pages";
+      /**
+       * ISR cache tags for this route (path tags + unstable_cache tags).
+       * Written to vinext-prerender.json and used by seedMemoryCacheFromPrerender
+       * to ensure updateTag/revalidateTag also invalidates prerendered ISR entries.
+       */
+      tags?: string[];
     }
   | {
       route: string;
@@ -974,6 +984,11 @@ export async function prerenderApp({
 
     // ── Render each URL via direct RSC handler invocation ─────────────────────
 
+    // Enable tag collection so that renderAppPageLifecycle() records per-page
+    // unstable_cache tags into the global sidecar. consumePrerenderPageTags()
+    // reads and clears these after each render so they end up in the manifest.
+    enablePrerenderTagCollection();
+
     /**
      * Render a single URL and return its result.
      * `onProgress` is intentionally not called here; the outer loop calls it
@@ -1033,6 +1048,13 @@ export async function prerenderApp({
 
         const html = await htmlRes.text();
 
+        // Capture ISR cache tags registered during this render.
+        // finalizeAppPageHtmlCacheResponse() calls recordPrerenderPageTags() eagerly
+        // (before the HTML stream is consumed) using the tags already registered
+        // synchronously by unstable_cache's _addCollectedFetchTags. We read them
+        // here so they can be written to the manifest for use by seedMemoryCacheFromPrerender.
+        const pageTags = consumePrerenderPageTags(urlPath);
+
         // Fetch RSC payload via a second invocation with RSC headers
         // TODO: Extract RSC payload from the first response instead of invoking the handler twice.
         const rscRequest = new Request(`http://localhost${urlPath}`, {
@@ -1042,6 +1064,8 @@ export async function prerenderApp({
           rscHandler(rscRequest),
         );
         const rscData = rscRes.ok ? await rscRes.text() : null;
+        // Clear any sidecar entry left by the RSC-only request.
+        consumePrerenderPageTags(urlPath);
 
         const outputFiles: string[] = [];
 
@@ -1068,6 +1092,7 @@ export async function prerenderApp({
           revalidate,
           router: "app",
           ...(urlPath !== routePattern ? { path: urlPath } : {}),
+          ...(pageTags.length > 0 ? { tags: pageTags } : {}),
         };
       } catch (e) {
         if (isSpeculative) {
@@ -1170,6 +1195,7 @@ export function writePrerenderIndex(
         revalidate: r.revalidate,
         router: r.router,
         ...(r.path ? { path: r.path } : {}),
+        ...(r.tags && r.tags.length > 0 ? { tags: r.tags } : {}),
       };
     }
     if (r.status === "skipped") {

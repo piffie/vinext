@@ -573,6 +573,23 @@ export function getCollectedFetchTags(): string[] {
 }
 
 /**
+ * Register additional tags with the current render pass so they are included
+ * in `getCollectedFetchTags()` and thus written to the page's ISR cache tags.
+ *
+ * Called by `unstable_cache()` so that page ISR entries are also invalidated
+ * when `revalidateTag(tag)` is called for a tag used by `unstable_cache`.
+ */
+export function addCollectedFetchTags(tags: string[]): void {
+  if (tags.length === 0) return;
+  const reqTags = _getState().currentRequestTags;
+  for (const tag of tags) {
+    if (!reqTags.includes(tag)) {
+      reqTags.push(tag);
+    }
+  }
+}
+
+/**
  * Get the minimum fetch-level revalidate seen during this render.
  * Used to derive the page ISR TTL when no explicit `export const revalidate`
  * is set: if all fetches have `next: { revalidate: N }`, the page should

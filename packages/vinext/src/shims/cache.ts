@@ -29,6 +29,7 @@ import {
   getRequestContext,
   runWithUnifiedStateMutation,
 } from "./unified-request-context.js";
+import { addCollectedFetchTags as _addCollectedFetchTags } from "./fetch-cache.js";
 
 // ---------------------------------------------------------------------------
 // Lazy accessor for cache context — avoids circular imports with cache-runtime.
@@ -721,6 +722,12 @@ export function unstable_cache<T extends (...args: any[]) => Promise<any>>(
 
     // Draft mode bypasses the cache — always fetch fresh data.
     const inDraftMode = _isDraftModeEnabled();
+
+    // Always register the unstable_cache tags with the current render pass so
+    // the page's ISR cache entry includes them as dependency tags. Without this,
+    // revalidateTag/updateTag would invalidate the unstable_cache entry but NOT
+    // the page ISR entry, leaving the page serving stale HTML from cache.
+    _addCollectedFetchTags(tags);
 
     if (!inDraftMode) {
       // Try to get from cache. Check cacheState so time-expired entries

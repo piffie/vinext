@@ -4,6 +4,7 @@ import { getMinFetchRevalidate } from "../shims/fetch-cache.js";
 import { getDynamicUsageReason } from "../shims/headers.js";
 import {
   finalizeAppPageHtmlCacheResponse,
+  recordPrerenderPageTags,
   scheduleAppPageRscCacheWrite,
 } from "./app-page-cache.js";
 import {
@@ -148,6 +149,14 @@ export async function renderAppPageLifecycle(
   const rscStream = options.renderToReadableStream(options.element, {
     onError: rscErrorTracker.onRenderError,
   });
+
+  // Record page tags for the prerender sidecar immediately after renderToReadableStream().
+  // unstable_cache calls _addCollectedFetchTags() synchronously (before any await),
+  // which happens during React's synchronous rendering pass inside renderToReadableStream().
+  // This ensures tags are captured for ALL pages — including speculative static pages that
+  // never reach finalizeAppPageHtmlCacheResponse (shouldWriteToCache=false).
+  // recordPrerenderPageTags() is a no-op unless enablePrerenderTagCollection() was called.
+  recordPrerenderPageTags(options.cleanPathname, options.getPageTags());
 
   let revalidateSeconds = options.revalidateSeconds;
   // Capture the RSC stream in all production non-force-dynamic renders so that

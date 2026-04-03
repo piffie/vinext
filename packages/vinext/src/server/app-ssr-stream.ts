@@ -100,20 +100,42 @@ export function createTickBufferedTransform(
   let injected = false;
   let buffered: string[] = [];
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  // Hold back everything from "</body>" onwards so finalScripts can be
+  // injected before </body></html> rather than appended after </html>.
+  let trailer: string | null = null;
 
   const flushBuffered = (controller: TransformStreamDefaultController<Uint8Array>): void => {
     for (const chunk of buffered) {
+      let out = chunk;
+
       if (!injected) {
-        const headEnd = chunk.indexOf("</head>");
+        const headEnd = out.indexOf("</head>");
         if (headEnd !== -1) {
-          const before = chunk.slice(0, headEnd);
-          const after = chunk.slice(headEnd);
-          controller.enqueue(encoder.encode(before + injectHTML + after));
+          out = out.slice(0, headEnd) + injectHTML + out.slice(headEnd);
           injected = true;
-          continue;
         }
       }
-      controller.enqueue(encoder.encode(chunk));
+
+      // Detect </body> and hold back from that point as the "trailer".
+      // The trailer is emitted in flush() together with finalScripts so
+      // the document always ends with …scripts…</body></html>.
+      if (trailer === null) {
+        const bodyEnd = out.lastIndexOf("</body>");
+        if (bodyEnd !== -1) {
+          const before = out.slice(0, bodyEnd);
+          trailer = out.slice(bodyEnd); // "</body>...</html>"
+          if (before) controller.enqueue(encoder.encode(before));
+          continue;
+        }
+      } else {
+        // Already have a trailer — accumulate subsequent content into it
+        // (deferred Suspense scripts that arrive after </body> in the same
+        // flush cycle).
+        trailer += out;
+        continue;
+      }
+
+      controller.enqueue(encoder.encode(out));
     }
     buffered = [];
   };
@@ -130,7 +152,18 @@ export function createTickBufferedTransform(
 
           const rscScripts = rscEmbed.flush();
           if (rscScripts) {
-            controller.enqueue(encoder.encode(rscScripts));
+            // If the trailer has already been captured, inject mid-stream RSC
+            // scripts before </body> instead of after it.
+            if (trailer !== null) {
+              const bodyEnd = trailer.indexOf("</body>");
+              if (bodyEnd !== -1) {
+                trailer = trailer.slice(0, bodyEnd) + rscScripts + trailer.slice(bodyEnd);
+              } else {
+                trailer += rscScripts;
+              }
+            } else {
+              controller.enqueue(encoder.encode(rscScripts));
+            }
           }
         } catch {
           // Stream was cancelled between when the timeout was registered and
@@ -155,7 +188,21 @@ export function createTickBufferedTransform(
       }
 
       const finalScripts = await rscEmbed.finalize();
-      if (finalScripts) {
+
+      // Emit the trailer (</body>...</html>) with finalScripts injected
+      // just before </body> so the document always ends with </body></html>.
+      if (trailer !== null) {
+        const bodyEnd = trailer.indexOf("</body>");
+        if (bodyEnd !== -1) {
+          const combined =
+            trailer.slice(0, bodyEnd) + (finalScripts || "") + trailer.slice(bodyEnd);
+          controller.enqueue(encoder.encode(combined));
+        } else {
+          // Unexpected: no </body> in trailer — emit as-is with scripts appended
+          controller.enqueue(encoder.encode(trailer + (finalScripts || "")));
+        }
+      } else if (finalScripts) {
+        // Fallback: </body> was not seen anywhere (e.g. error/empty page)
         controller.enqueue(encoder.encode(finalScripts));
       }
     },

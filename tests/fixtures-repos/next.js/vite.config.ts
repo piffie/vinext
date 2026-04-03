@@ -1,8 +1,35 @@
-import { defineConfig } from "vite-plus";
+import { defineConfig, type Plugin } from "vite-plus";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
+/**
+ * Some upstream Next.js fixture files use CJS `require('./some.test')` to
+ * re-run another test file with different env vars (e.g.
+ * app-static-custom-handler.test.ts requires app-static.test.ts). In our
+ * ESM-first Vitest setup this fails because Node.js's CJS require can't load
+ * TypeScript files that use ESM `import` statements with Vite aliases.
+ *
+ * The fix: transform `require('./foo.test')` → `await import('./foo.test')`.
+ * Vitest processes every .ts file through vite-node's async module evaluator,
+ * so top-level `await` works. The dynamic `import()` goes through Vite's full
+ * module resolution pipeline, which resolves aliases like `e2e-utils` and
+ * applies TypeScript transforms correctly.
+ */
+const requireToImportPlugin: Plugin = {
+  name: "vinext-test:cjs-require-to-esm-import",
+  enforce: "pre",
+  transform(code, id) {
+    if (!id.includes("/clone/")) return;
+    if (!code.includes("require(")) return;
+    return code.replace(
+      /\brequire\((['"])(\.\/[^'"]+\.test)\1\)/g,
+      (_match, _quote, specifier) => `await import('${specifier}')`,
+    );
+  },
+};
+
 export default defineConfig({
+  plugins: [requireToImportPlugin],
   test: {
     reporters: process.env.CI ? ["default", "github-actions"] : ["default", "agent"],
     setupFiles: [join(import.meta.dirname, "./vitest-setup.ts")],
@@ -12,14 +39,6 @@ export default defineConfig({
       "e2e-utils": join(import.meta.dirname, "./next-test-setup.js"),
       "next-test-utils": join(import.meta.dirname, "./next-test-utils.js"),
     },
-
-    // Exclude fixture files that use CJS `require('./foo.test')` to re-run
-    // another test file with different env vars. vite-node's require shim
-    // falls back to Node.js CJS for the required file's transitive ESM
-    // imports, which can't resolve Vite aliases (e.g. 'e2e-utils'). These
-    // files are covered by the skip-manifest "*": ["*"] wildcard anyway —
-    // excluding them produces the same outcome without the load-time crash.
-    exclude: ["**/*-custom-handler.test.*", "**/node_modules/**"],
 
     fileParallelism: false,
     testTimeout: 30_000,

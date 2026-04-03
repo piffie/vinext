@@ -996,7 +996,23 @@ async function buildPageElement(route, params, opts, searchParams) {
   // Next.js 16 passes params/searchParams as Promises (async pattern)
   // but pre-16 code accesses them as plain objects (params.id).
   // makeThenableParams() normalises null-prototype + preserves both patterns.
-  const asyncParams = makeThenableParams(params);
+  //
+  // Reorder params in routeSegments order. The trie matcher inserts params
+  // deepest-first (due to recursion unwinding), but Next.js expects them in
+  // outermost-first (URL left-to-right) order. Build an ordered copy by
+  // iterating routeSegments so that JSON.stringify / Object.keys give the
+  // same order as Next.js (e.g. {"category":"books","id":"hello-world"}).
+  const _orderedPageParams = {};
+  for (const _s of (route.routeSegments || [])) {
+    let _ppn;
+    if (_s.startsWith("[[...") && _s.endsWith("]]")) { _ppn = _s.slice(5, -2); }
+    else if (_s.startsWith("[...") && _s.endsWith("]")) { _ppn = _s.slice(4, -1); }
+    else if (_s.startsWith("[") && _s.endsWith("]")) { _ppn = _s.slice(1, -1); }
+    if (_ppn !== undefined && Object.prototype.hasOwnProperty.call(params, _ppn)) {
+      _orderedPageParams[_ppn] = params[_ppn];
+    }
+  }
+  const asyncParams = makeThenableParams(_orderedPageParams);
   const pageProps = { params: asyncParams };
   if (searchParams) {
     // Always provide searchParams prop when the URL object is available, even
@@ -1114,7 +1130,30 @@ async function buildPageElement(route, params, opts, searchParams) {
         }
       }
 
-      const layoutProps = { children: element, params: makeThenableParams(params) };
+      // Compute params scoped to this layout's depth: each layout only receives
+      // params from segments at or above its own level in the route tree.
+      // layoutTreePositions[i] is the index of this layout's first *child* segment
+      // in routeSegments. All segments before that index belong to this layout and
+      // above, so we extract the dynamic param keys from those segments only.
+      const _tpForParams = route.layoutTreePositions ? route.layoutTreePositions[i] : (route.routeSegments || []).length;
+      const _segsForLayout = (route.routeSegments || []).slice(0, _tpForParams);
+      // Build layout-scoped params in segment order (mirrors Next.js key ordering).
+      const _layoutParams = {};
+      for (const _seg of _segsForLayout) {
+        let _pn;
+        if (_seg.startsWith("[[...") && _seg.endsWith("]]")) {
+          _pn = _seg.slice(5, -2);
+        } else if (_seg.startsWith("[...") && _seg.endsWith("]")) {
+          _pn = _seg.slice(4, -1);
+        } else if (_seg.startsWith("[") && _seg.endsWith("]")) {
+          _pn = _seg.slice(1, -1);
+        }
+        if (_pn !== undefined && Object.prototype.hasOwnProperty.call(params, _pn)) {
+          _layoutParams[_pn] = params[_pn];
+        }
+      }
+
+      const layoutProps = { children: element, params: makeThenableParams(_layoutParams) };
 
       // Add parallel slot elements to the layout that defines them.
       // Each slot has a layoutIndex indicating which layout it belongs to.

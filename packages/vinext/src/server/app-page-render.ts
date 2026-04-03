@@ -139,6 +139,16 @@ export async function renderAppPageLifecycle(
       return options.runWithSuppressedHookWarning(probe);
     },
   });
+  // Record page tags for the prerender sidecar before any early-return path.
+  // The probe may have awaited the page component (e.g. for notFound detection),
+  // which means fetch tags collected via _addCollectedFetchTags are already
+  // available here even if we're about to return a preRenderResponse (404/redirect).
+  // For normal pages we'll call this again after renderToReadableStream() to also
+  // capture unstable_cache tags; the second call overwrites the first since the
+  // sidecar is keyed by pathname.
+  // recordPrerenderPageTags() is a no-op unless enablePrerenderTagCollection() was called.
+  recordPrerenderPageTags(options.cleanPathname, options.getPageTags());
+
   if (preRenderResponse) {
     return preRenderResponse;
   }
@@ -150,12 +160,10 @@ export async function renderAppPageLifecycle(
     onError: rscErrorTracker.onRenderError,
   });
 
-  // Record page tags for the prerender sidecar immediately after renderToReadableStream().
-  // unstable_cache calls _addCollectedFetchTags() synchronously (before any await),
-  // which happens during React's synchronous rendering pass inside renderToReadableStream().
-  // This ensures tags are captured for ALL pages — including speculative static pages that
-  // never reach finalizeAppPageHtmlCacheResponse (shouldWriteToCache=false).
-  // recordPrerenderPageTags() is a no-op unless enablePrerenderTagCollection() was called.
+  // Record page tags again after renderToReadableStream() to capture unstable_cache tags.
+  // unstable_cache calls _addCollectedFetchTags() synchronously during React's rendering
+  // pass inside renderToReadableStream(). This call overwrites the earlier probe-time
+  // recording, now including any additional unstable_cache tags.
   recordPrerenderPageTags(options.cleanPathname, options.getPageTags());
 
   let revalidateSeconds = options.revalidateSeconds;

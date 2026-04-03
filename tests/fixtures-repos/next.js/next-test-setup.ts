@@ -1286,12 +1286,60 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
       await origDeleteFile(filePath);
     };
 
-    // Provide stub Next.js manifest files so isNextStart-gated beforeAll blocks
-    // don't throw when reading files that only exist in a real `next build`.
-    // In start mode, try tmpDir first (the production build output) before
-    // falling back to the source files in opts.files.
+    // ── Virtual file interception ─────────────────────────────────────────────
+    // Some tests read Next.js-specific build artifacts (e.g. .meta sidecar files,
+    // prerender-manifest.json) that we don't write as actual files. Instead we
+    // generate their content on-demand from vinext-prerender.json.
+    // For all other paths we fall through to the filesystem (tmpDir first, then
+    // the source directory via origReadFile).
+
+    /** Lazy-loaded cache for vinext-prerender.json in this build. */
+    let _prerenderIndex: Record<string, unknown> | null = null;
+    let _prerenderIndexLoaded = false;
+    function getPrerenderIndex(): Record<string, unknown> | null {
+      if (_prerenderIndexLoaded) return _prerenderIndex;
+      try {
+        _prerenderIndex = JSON.parse(
+          fs.readFileSync(path.join(tmpDir, "server", "vinext-prerender.json"), "utf-8"),
+        );
+      } catch {
+        _prerenderIndex = null;
+      }
+      _prerenderIndexLoaded = true;
+      return _prerenderIndex;
+    }
+
+    /**
+     * Generate a Next.js .meta sidecar JSON string for a prerendered route.
+     * Returns null if the route is not found in vinext-prerender.json.
+     *
+     * Format: { headers: { "x-next-cache-tags": "..." }, status: number }
+     */
+    function generateMetaForRoute(routePath: string): string | null {
+      const idx = getPrerenderIndex();
+      if (!idx || !Array.isArray(idx.routes)) return null;
+      // Find the rendered entry whose concrete path (or route pattern for static routes)
+      // matches routePath.
+      const entry = (idx.routes as Array<Record<string, unknown>>).find(
+        (r) =>
+          r.status === "rendered" && (r.path === routePath || (!r.path && r.route === routePath)),
+      );
+      if (!entry) return null;
+      const tags: string[] = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
+      // x-next-cache-tags excludes the bare pathname (e.g. /foo/bar)
+      const metaTags = tags.filter((t) => t !== routePath);
+      return JSON.stringify({
+        headers: { "x-next-cache-tags": metaTags.join(",") },
+        status: typeof entry.httpStatus === "number" ? entry.httpStatus : 200,
+      });
+    }
+
     const origReadFile = next.readFile.bind(next);
     next.readFile = async (filePath: string) => {
+      // .next/prerender-manifest.json — return a stub so tests that only need
+      // the manifest version/structure don't fail.  Tests that validate the
+      // exact manifest contents are kept in the skip list until we generate
+      // a proper manifest from vinext-prerender.json.
       if (filePath === ".next/prerender-manifest.json") {
         return JSON.stringify({
           version: 4,
@@ -1301,6 +1349,23 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
           preview: { previewModeId: "", previewModeSigningKey: "", previewModeEncryptionKey: "" },
         });
       }
+
+      // .next/server/app/**.meta — generate from vinext-prerender.json.
+      // We do not write .meta files to disk; the content is derived from the
+      // prerender build index which stores tags and HTTP status per route.
+      const metaMatch = filePath.match(/^\.next\/server\/app\/(.+)\.meta$/);
+      if (metaMatch) {
+        // Map file path segment back to URL path.
+        // "index" → "/" (root route special case)
+        // "prerendered-not-found/first" → "/prerendered-not-found/first"
+        const segment = metaMatch[1];
+        const routePath = segment === "index" ? "/" : "/" + segment;
+        const meta = generateMetaForRoute(routePath);
+        if (meta !== null) return meta;
+        // Fall through — maybe there's a real file in tmpDir (e.g. from the
+        // 404 not-found page which might have its own entry).
+      }
+
       const tmpPath = path.join(tmpDir, filePath);
       try {
         return fs.readFileSync(tmpPath, "utf-8");
@@ -1310,6 +1375,14 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     };
     const origReadJSON = next.readJSON.bind(next);
     next.readJSON = async (filePath: string) => {
+      // Intercept .meta reads via readJSON too
+      const metaMatch = filePath.match(/^\.next\/server\/app\/(.+)\.meta$/);
+      if (metaMatch) {
+        const segment = metaMatch[1];
+        const routePath = segment === "index" ? "/" : "/" + segment;
+        const meta = generateMetaForRoute(routePath);
+        if (meta !== null) return JSON.parse(meta);
+      }
       const tmpPath = path.join(tmpDir, filePath);
       try {
         return JSON.parse(fs.readFileSync(tmpPath, "utf-8"));

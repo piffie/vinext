@@ -63,6 +63,11 @@ export type PrerenderRouteResult =
        * to ensure updateTag/revalidateTag also invalidates prerendered ISR entries.
        */
       tags?: string[];
+      /**
+       * HTTP status code of the prerendered response.
+       * Omitted when 200. Present for routes that rendered a not-found (404) page.
+       */
+      httpStatus?: number;
     }
   | {
       route: string;
@@ -704,8 +709,11 @@ export async function prerenderApp({
   setCacheHandler(new MemoryCacheHandler());
   // VINEXT_PRERENDER=1 tells the prod server to skip instrumentation.register()
   // and enable prerender-only endpoints (/__vinext/prerender/*).
-  // The set/delete is wrapped in try/finally so it is always restored.
+  // NEXT_PHASE=phase-production-build matches Next.js behavior during static generation:
+  // pages can check process.env.NEXT_PHASE to call notFound() at build time.
+  // Both are set/deleted here and restored in the finally block.
   process.env.VINEXT_PRERENDER = "1";
+  process.env.NEXT_PHASE = "phase-production-build";
 
   const serverDir = path.dirname(rscBundlePath);
 
@@ -1015,15 +1023,25 @@ export async function prerenderApp({
         const htmlRes = await runWithHeadersContext(headersContextFromRequest(htmlRequest), () =>
           rscHandler(htmlRequest),
         );
-        if (!htmlRes.ok) {
+        const httpStatus = htmlRes.status;
+
+        // Non-ok responses that are not 404 are errors (or skips for speculative routes).
+        if (!htmlRes.ok && httpStatus !== 404) {
+          consumePrerenderPageTags(urlPath);
           if (isSpeculative) {
             return { route: routePattern, status: "skipped", reason: "dynamic" };
           }
           return {
             route: routePattern,
             status: "error",
-            error: `RSC handler returned ${htmlRes.status}`,
+            error: `RSC handler returned ${httpStatus}`,
           };
+        }
+
+        // Speculative route that returned 404: not a static page.
+        if (isSpeculative && !htmlRes.ok) {
+          consumePrerenderPageTags(urlPath);
+          return { route: routePattern, status: "skipped", reason: "dynamic" };
         }
 
         // Detect dynamic usage via Cache-Control: no-store in the render response.
@@ -1037,6 +1055,7 @@ export async function prerenderApp({
           if (cacheControl.includes("no-store")) {
             const dynamicReason = htmlRes.headers.get("x-vinext-dynamic-reason");
             await htmlRes.body?.cancel();
+            consumePrerenderPageTags(urlPath);
             if (dynamicReason) {
               console.log(
                 `Static generation failed due to dynamic usage on ${urlPath}, reason: ${dynamicReason}`,
@@ -1049,21 +1068,25 @@ export async function prerenderApp({
         const html = await htmlRes.text();
 
         // Capture ISR cache tags registered during this render.
-        // finalizeAppPageHtmlCacheResponse() calls recordPrerenderPageTags() eagerly
-        // (before the HTML stream is consumed) using the tags already registered
-        // synchronously by unstable_cache's _addCollectedFetchTags. We read them
-        // here so they can be written to the manifest for use by seedMemoryCacheFromPrerender.
-        const pageTags = consumePrerenderPageTags(urlPath);
+        // Rewrite the hierarchy tags (_N_T_/.../layout and .../page) to use the
+        // route pattern instead of the concrete URL. This matches Next.js which
+        // uses revalidatePath('/blog/[slug]', 'page') to target the pattern tag.
+        const rawPageTags = consumePrerenderPageTags(urlPath);
+        const pageTags = rewriteTagsToRoutePattern(rawPageTags, urlPath, routePattern);
 
         // Fetch RSC payload via a second invocation with RSC headers
         // TODO: Extract RSC payload from the first response instead of invoking the handler twice.
-        const rscRequest = new Request(`http://localhost${urlPath}`, {
-          headers: { Accept: "text/x-component", RSC: "1" },
-        });
-        const rscRes = await runWithHeadersContext(headersContextFromRequest(rscRequest), () =>
-          rscHandler(rscRequest),
-        );
-        const rscData = rscRes.ok ? await rscRes.text() : null;
+        // Skip RSC fetch for 404 pages - they don't have a meaningful RSC payload.
+        let rscData: string | null = null;
+        if (httpStatus === 200) {
+          const rscRequest = new Request(`http://localhost${urlPath}`, {
+            headers: { Accept: "text/x-component", RSC: "1" },
+          });
+          const rscRes = await runWithHeadersContext(headersContextFromRequest(rscRequest), () =>
+            rscHandler(rscRequest),
+          );
+          rscData = rscRes.ok ? await rscRes.text() : null;
+        }
         // Clear any sidecar entry left by the RSC-only request.
         consumePrerenderPageTags(urlPath);
 
@@ -1075,25 +1098,6 @@ export async function prerenderApp({
         fs.mkdirSync(path.dirname(htmlFullPath), { recursive: true });
         fs.writeFileSync(htmlFullPath, html, "utf-8");
         outputFiles.push(htmlOutputPath);
-
-        // Write .meta file alongside the .html file.
-        // The meta file contains the HTTP status and x-next-cache-tags header,
-        // mirroring Next.js's .meta sidecar format so tests that read
-        // .next/server/app/**.meta can find the cache tags.
-        // Filter out the bare pathname (urlPath) — x-next-cache-tags only
-        // contains _N_T_-prefixed and explicit tags, not the raw path.
-        {
-          const metaTags = pageTags.filter((t) => t !== urlPath);
-          const metaOutputPath = htmlOutputPath.replace(/\.html$/, ".meta");
-          const metaFullPath = path.join(outDir, metaOutputPath);
-          const metaContent = JSON.stringify({
-            headers: {
-              "x-next-cache-tags": metaTags.join(","),
-            },
-            status: htmlRes.status,
-          });
-          fs.writeFileSync(metaFullPath, metaContent, "utf-8");
-        }
 
         // Write RSC payload (.rsc file)
         if (rscData !== null) {
@@ -1112,6 +1116,7 @@ export async function prerenderApp({
           router: "app",
           ...(urlPath !== routePattern ? { path: urlPath } : {}),
           ...(pageTags.length > 0 ? { tags: pageTags } : {}),
+          ...(httpStatus !== 200 ? { httpStatus } : {}),
         };
       } catch (e) {
         if (isSpeculative) {
@@ -1174,6 +1179,7 @@ export async function prerenderApp({
   } finally {
     setCacheHandler(previousHandler);
     delete process.env.VINEXT_PRERENDER;
+    delete process.env.NEXT_PHASE;
     if (ownedProdServerHandle) {
       await new Promise<void>((resolve) => ownedProdServerHandle!.server.close(() => resolve()));
     }
@@ -1188,6 +1194,90 @@ export async function prerenderApp({
 export function getRscOutputPath(urlPath: string): string {
   if (urlPath === "/") return "index.rsc";
   return urlPath.replace(/^\//, "") + ".rsc";
+}
+
+// ─── Tag helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Convert an Express-style route pattern segment to Next.js bracket style.
+ *
+ * - `:slug`    → `[slug]`
+ * - `:slug+`   → `[...slug]`
+ * - `:slug*`   → `[[...slug]]`
+ */
+function expressSegToNextJs(seg: string): string {
+  const catchAll = seg.match(/^:(.+)\+$/);
+  if (catchAll) return `[...${catchAll[1]}]`;
+  const optionalCatchAll = seg.match(/^:(.+)\*$/);
+  if (optionalCatchAll) return `[[...${optionalCatchAll[1]}]]`;
+  const dynamic = seg.match(/^:(.+)$/);
+  if (dynamic) return `[${dynamic[1]}]`;
+  return seg;
+}
+
+/**
+ * Convert an Express-style route pattern (e.g. `/blog/:slug`) to Next.js
+ * file-system bracket notation (e.g. `/blog/[slug]`).
+ *
+ * vinext stores route patterns in Express style internally; Next.js tag names
+ * (`_N_T_`) use the bracket notation so revalidatePath('/blog/[slug]', 'page')
+ * targets the right cache entries.
+ */
+function expressPatternToNextJs(pattern: string): string {
+  return "/" + pattern.split("/").filter(Boolean).map(expressSegToNextJs).join("/");
+}
+
+/**
+ * Rewrite the _N_T_ hierarchy tags in `tags` to use the route pattern instead
+ * of the concrete URL path for the layout/page segment identifiers.
+ *
+ * Next.js uses the route pattern (e.g. `/blog/[slug]`) for revalidatePath()
+ * target matching, so `_N_T_/blog/[slug]/page` is the canonical tag rather
+ * than `_N_T_/blog/hello-world/page`. We post-process the tags emitted by
+ * `__pageCacheTags()` (which uses the concrete path) to match this behaviour.
+ *
+ * Result order:
+ *   [bare_pathname, ...hierarchy_tags_using_pattern, instance_tag, ...fetch_tags]
+ *
+ * @param tags         Tags from getPageTags() / consumePrerenderPageTags()
+ * @param urlPath      Concrete prerendered URL, e.g. `/blog/hello-world`
+ * @param routePattern Route file-system pattern in Express style, e.g. `/blog/:slug`
+ */
+export function rewriteTagsToRoutePattern(
+  tags: string[],
+  urlPath: string,
+  routePattern: string,
+): string[] {
+  if (urlPath === routePattern) return tags;
+
+  // Convert Express-style pattern to Next.js bracket style for tag names
+  const nextJsPattern = expressPatternToNextJs(routePattern);
+
+  // Identify concrete-path hierarchy tags generated by __pageCacheTags
+  const concreteBareSegs = urlPath.split("/").filter(Boolean);
+  const oldHierarchy = new Set<string>(["_N_T_/layout"]);
+  let cBuilt = "";
+  for (const seg of concreteBareSegs) {
+    cBuilt += "/" + seg;
+    oldHierarchy.add(`_N_T_${cBuilt}/layout`);
+  }
+  oldHierarchy.add(`_N_T_${cBuilt}/page`);
+
+  // Build hierarchy tags from the Next.js-style route pattern
+  const patternSegs = nextJsPattern.split("/").filter(Boolean);
+  const newHierarchy: string[] = ["_N_T_/layout"];
+  let pBuilt = "";
+  for (const seg of patternSegs) {
+    pBuilt += "/" + seg;
+    newHierarchy.push(`_N_T_${pBuilt}/layout`);
+  }
+  newHierarchy.push(`_N_T_${pBuilt}/page`);
+
+  // Separate remaining tags: bare pathname, instance tag, explicit fetch tags
+  const instanceTag = `_N_T_${urlPath}`;
+  const fetchTags = tags.filter((t) => !oldHierarchy.has(t) && t !== urlPath && t !== instanceTag);
+
+  return [urlPath, ...newHierarchy, instanceTag, ...fetchTags];
 }
 
 // ─── Build index ──────────────────────────────────────────────────────────────
@@ -1215,6 +1305,7 @@ export function writePrerenderIndex(
         router: r.router,
         ...(r.path ? { path: r.path } : {}),
         ...(r.tags && r.tags.length > 0 ? { tags: r.tags } : {}),
+        ...(r.httpStatus && r.httpStatus !== 200 ? { httpStatus: r.httpStatus } : {}),
       };
     }
     if (r.status === "skipped") {

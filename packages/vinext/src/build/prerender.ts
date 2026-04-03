@@ -1076,6 +1076,25 @@ export async function prerenderApp({
         fs.writeFileSync(htmlFullPath, html, "utf-8");
         outputFiles.push(htmlOutputPath);
 
+        // Write .meta file alongside the .html file.
+        // The meta file contains the HTTP status and x-next-cache-tags header,
+        // mirroring Next.js's .meta sidecar format so tests that read
+        // .next/server/app/**.meta can find the cache tags.
+        // Filter out the bare pathname (urlPath) — x-next-cache-tags only
+        // contains _N_T_-prefixed and explicit tags, not the raw path.
+        {
+          const metaTags = pageTags.filter((t) => t !== urlPath);
+          const metaOutputPath = htmlOutputPath.replace(/\.html$/, ".meta");
+          const metaFullPath = path.join(outDir, metaOutputPath);
+          const metaContent = JSON.stringify({
+            headers: {
+              "x-next-cache-tags": metaTags.join(","),
+            },
+            status: htmlRes.status,
+          });
+          fs.writeFileSync(metaFullPath, metaContent, "utf-8");
+        }
+
         // Write RSC payload (.rsc file)
         if (rscData !== null) {
           const rscOutputPath = getRscOutputPath(urlPath);

@@ -821,6 +821,17 @@ function makeNextInstance(
     env: opts.env ?? {},
 
     async readFile(filePath: string) {
+      // In start mode (testDir = tmpDir), check the build output dir first so
+      // that .next/** paths resolve to build artifacts (e.g. .meta files, .rsc
+      // files) via the symlink tmpDir/.next/server/app → prerendered-routes.
+      if (testDir) {
+        const buildAbs = path.join(testDir, filePath);
+        try {
+          return fs.readFileSync(buildAbs, "utf-8");
+        } catch {
+          // Fall through to source dir
+        }
+      }
       const abs = path.join(opts.files, filePath);
       try {
         return fs.readFileSync(abs, "utf-8");
@@ -830,6 +841,15 @@ function makeNextInstance(
     },
     // oxlint-disable-next-line typescript/no-explicit-any
     async readJSON(filePath: string): Promise<any> {
+      // In start mode (testDir = tmpDir), check build output dir first.
+      if (testDir) {
+        const buildAbs = path.join(testDir, filePath);
+        try {
+          return JSON.parse(fs.readFileSync(buildAbs, "utf-8"));
+        } catch {
+          // Fall through to source dir
+        }
+      }
       const abs = path.join(opts.files, filePath);
       try {
         return JSON.parse(fs.readFileSync(abs, "utf-8"));

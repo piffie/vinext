@@ -691,6 +691,12 @@ let _lastPathnameAndSearch =
 // any component calls useRouter().
 if (typeof window !== "undefined") {
   window.addEventListener("popstate", (e: PopStateEvent) => {
+    // App Router pages handle popstate via window.__VINEXT_RSC_NAVIGATE__ in
+    // app-browser-entry.ts. Skip Pages Router handling to avoid triggering a
+    // hard reload (navigateClient falls back to window.location.href when
+    // window.__VINEXT_ROOT__ is not set, which it isn't for App Router pages).
+    if (typeof window.__VINEXT_RSC_NAVIGATE__ === "function") return;
+
     const browserUrl = window.location.pathname + window.location.search;
     const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
 

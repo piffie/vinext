@@ -399,6 +399,7 @@ function renderNavigationPayload(
     updateBrowserTree(payload, navigationSnapshot, renderId, useTransition, true);
   } catch (error) {
     // Clean up pending state and decrement counter on synchronous error.
+    console.error("[vinext:nav] renderNavigationPayload sync error:", error);
     pendingNavigationPrePaintEffects.delete(renderId);
     const resolve = pendingNavigationCommits.get(renderId);
     pendingNavigationCommits.delete(renderId);
@@ -607,12 +608,13 @@ async function main(): Promise<void> {
     }
 
     let _snapshotPending = false;
+    let _debugRscUrl: string | undefined;
     // Hoist navId above try so the catch block can guard against hard-navigating
     // to a stale URL when this navigation has already been superseded.
     const navId = ++activeNavigationId;
     try {
       const url = new URL(href, window.location.origin);
-      const rscUrl = toRscUrl(url.pathname + url.search);
+      const rscUrl = (_debugRscUrl = toRscUrl(url.pathname + url.search));
       // Use startTransition for same-route navigations (searchParam changes)
       // so React keeps the old UI visible during the transition. For cross-route
       // navigations (different pathname), use synchronous updates — React's
@@ -770,7 +772,7 @@ async function main(): Promise<void> {
       // Don't hard-navigate to a stale URL if this navigation was superseded by
       // a newer one — the newer navigation is already in flight and would be clobbered.
       if (navId !== activeNavigationId) return;
-      console.error("[vinext] RSC navigation error:", error);
+      console.error("[vinext] RSC navigation error:", navigationKind, _debugRscUrl ?? href, error);
       window.location.href = href;
     }
   };

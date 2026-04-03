@@ -855,7 +855,10 @@ type WorkerAppRouterEntry = {
 
 type AppRouterHandlerResult = { response: Response; drain: () => Promise<void> };
 
-function createTrackedNodeExecutionContext(): { ctx: ExecutionContextLike; drain: () => Promise<void> } {
+function createTrackedNodeExecutionContext(): {
+  ctx: ExecutionContextLike;
+  drain: () => Promise<void>;
+} {
   const pending: Promise<unknown>[] = [];
   return {
     ctx: {
@@ -870,11 +873,15 @@ function createTrackedNodeExecutionContext(): { ctx: ExecutionContextLike; drain
   };
 }
 
-function resolveAppRouterHandler(entry: unknown): (request: Request) => Promise<AppRouterHandlerResult> {
+function resolveAppRouterHandler(
+  entry: unknown,
+): (request: Request) => Promise<AppRouterHandlerResult> {
   if (typeof entry === "function") {
     return async (request) => {
       const { ctx, drain } = createTrackedNodeExecutionContext();
-      const response = await Promise.resolve((entry as (r: Request, ctx: ExecutionContextLike) => Promise<Response>)(request, ctx));
+      const response = await Promise.resolve(
+        (entry as (r: Request, ctx: ExecutionContextLike) => Promise<Response>)(request, ctx),
+      );
       return { response, drain };
     };
   }

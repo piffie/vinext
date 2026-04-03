@@ -154,13 +154,14 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
     ? readBuildId(path.dirname(options.rscBundlePath))
     : undefined;
 
-  const config = options.nextConfigOverride || compiledBuildId
-    ? {
-        ...loadedConfig,
-        ...(compiledBuildId ? { buildId: compiledBuildId } : {}),
-        ...options.nextConfigOverride,
-      }
-    : loadedConfig;
+  const config =
+    options.nextConfigOverride || compiledBuildId
+      ? {
+          ...loadedConfig,
+          ...(compiledBuildId ? { buildId: compiledBuildId } : {}),
+          ...options.nextConfigOverride,
+        }
+      : loadedConfig;
   // Activate export mode when next.config.js sets `output: 'export'`.
   // In export mode, SSR routes and any dynamic routes without static params are
   // build errors rather than silently skipped.

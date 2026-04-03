@@ -395,17 +395,32 @@ async function makeBrowserInstance(
     },
 
     back() {
-      return makeVoidHandle(
-        page.goBack().then(() => undefined as void),
-        page,
-      );
+      const p = (async () => {
+        const currentHref = await page.evaluate(() => window.location.href);
+        // Use window.history.back() instead of page.goBack() (CDP Page.navigateToHistoryEntry)
+        // because CDP navigation treats pushState entries as cross-document and triggers
+        // a full page reload, breaking SPA back-navigation that should fire popstate.
+        void page.evaluate(() => window.history.back()).catch(() => {});
+        await page.waitForFunction(
+          (prev: string) => window.location.href !== prev,
+          currentHref,
+          { timeout: 15_000 },
+        );
+      })();
+      return makeVoidHandle(p.then(() => undefined as void), page);
     },
 
     forward() {
-      return makeVoidHandle(
-        page.goForward().then(() => undefined as void),
-        page,
-      );
+      const p = (async () => {
+        const currentHref = await page.evaluate(() => window.location.href);
+        void page.evaluate(() => window.history.forward()).catch(() => {});
+        await page.waitForFunction(
+          (prev: string) => window.location.href !== prev,
+          currentHref,
+          { timeout: 15_000 },
+        );
+      })();
+      return makeVoidHandle(p.then(() => undefined as void), page);
     },
 
     refresh() {
@@ -1159,12 +1174,17 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     const addr = server.address();
     const port = typeof addr === "object" && addr ? addr.port : 3000;
     const baseUrl = `http://127.0.0.1:${port}`;
+    // Some fixture pages construct self-referential fetch URLs using
+    // process.env.PORT (e.g. force-cache/large-data). Set it to the actual
+    // bound port so those pages can reach the local API routes.
+    process.env.PORT = String(port);
 
     async function doStop() {
       // Restore console before teardown
       console.log = origLog;
       console.warn = origWarn;
       console.error = origError;
+      delete process.env.PORT;
       delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.override")];
       await new Promise<void>((resolve) => _httpServer?.close(() => resolve()) ?? resolve());
       _httpServer = null;

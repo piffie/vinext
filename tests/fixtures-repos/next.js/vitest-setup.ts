@@ -221,14 +221,14 @@ async function getRedboxCallStack(browser: BrowserInstance): Promise<string[] | 
 
 // ── Snapshot builder ───────────────────────────────────────────────────────────
 
-interface RedboxSnapshot {
+type RedboxSnapshot = {
   code?: string;
   description?: string;
   environmentLabel: string | null;
   label: string | null;
   source: string | null;
   stack: string[];
-}
+};
 
 /**
  * Normalise the source frame the same way Next.js does: strip surrounding

@@ -1,7 +1,7 @@
 import "vitest";
 
 declare module "vitest" {
-  interface Assertion<T = unknown> {
+  type Assertion<T = unknown> = {
     toEndWith(suffix: string): void;
     toStartWith(prefix: string): void;
     toInclude(substring: string): void;
@@ -45,5 +45,5 @@ declare module "vitest" {
      *   auto-generate on first run.
      */
     toDisplayCollapsedRedbox(inlineSnapshot?: string): Promise<void>;
-  }
+  };
 }

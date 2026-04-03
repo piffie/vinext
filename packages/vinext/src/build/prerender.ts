@@ -33,6 +33,12 @@ import {
   consumePrerenderPageTags,
   enablePrerenderTagCollection,
 } from "../server/app-page-cache.js";
+import {
+  consumePrerenderFetchMetrics,
+  disablePrerenderMetricsCollection,
+  enablePrerenderMetricsCollection,
+  type PrerenderFetchMetric,
+} from "../shims/fetch-cache.js";
 export { readPrerenderSecret } from "./server-manifest.js";
 
 // ─── Public Types ─────────────────────────────────────────────────────────────
@@ -68,6 +74,12 @@ export type PrerenderRouteResult =
        * Omitted when 200. Present for routes that rendered a not-found (404) page.
        */
       httpStatus?: number;
+      /**
+       * Fetch metrics collected during prerender for diagnostics.
+       * Written to vinext-prerender.json and used to generate
+       * .next/diagnostics/fetch-metrics.json for test compatibility.
+       */
+      fetchMetrics?: PrerenderFetchMetric[];
     }
   | {
       route: string;
@@ -996,6 +1008,9 @@ export async function prerenderApp({
     // unstable_cache tags into the global sidecar. consumePrerenderPageTags()
     // reads and clears these after each render so they end up in the manifest.
     enablePrerenderTagCollection();
+    // Enable fetch metrics collection so that every cacheable fetch during
+    // prerender records a diagnostic entry keyed by navPathname.
+    enablePrerenderMetricsCollection();
 
     /**
      * Render a single URL and return its result.
@@ -1073,6 +1088,7 @@ export async function prerenderApp({
         // uses revalidatePath('/blog/[slug]', 'page') to target the pattern tag.
         const rawPageTags = consumePrerenderPageTags(urlPath);
         const pageTags = rewriteTagsToRoutePattern(rawPageTags, urlPath, routePattern);
+        const fetchMetrics = consumePrerenderFetchMetrics(urlPath);
 
         // Fetch RSC payload via a second invocation with RSC headers
         // TODO: Extract RSC payload from the first response instead of invoking the handler twice.
@@ -1089,6 +1105,10 @@ export async function prerenderApp({
         }
         // Clear any sidecar entry left by the RSC-only request.
         consumePrerenderPageTags(urlPath);
+        // Discard any fetch metrics recorded during the RSC-only request — we
+        // only want metrics from the HTML render (first pass) which mirrors what
+        // Next.js logs in its diagnostics output (one entry per unique fetch).
+        consumePrerenderFetchMetrics(urlPath);
 
         const outputFiles: string[] = [];
 
@@ -1117,6 +1137,7 @@ export async function prerenderApp({
           ...(urlPath !== routePattern ? { path: urlPath } : {}),
           ...(pageTags.length > 0 ? { tags: pageTags } : {}),
           ...(httpStatus !== 200 ? { httpStatus } : {}),
+          ...(fetchMetrics.length > 0 ? { fetchMetrics } : {}),
         };
       } catch (e) {
         if (isSpeculative) {
@@ -1180,6 +1201,7 @@ export async function prerenderApp({
     setCacheHandler(previousHandler);
     delete process.env.VINEXT_PRERENDER;
     delete process.env.NEXT_PHASE;
+    disablePrerenderMetricsCollection();
     if (ownedProdServerHandle) {
       await new Promise<void>((resolve) => ownedProdServerHandle!.server.close(() => resolve()));
     }
@@ -1306,6 +1328,7 @@ export function writePrerenderIndex(
         ...(r.path ? { path: r.path } : {}),
         ...(r.tags && r.tags.length > 0 ? { tags: r.tags } : {}),
         ...(r.httpStatus && r.httpStatus !== 200 ? { httpStatus: r.httpStatus } : {}),
+        ...(r.fetchMetrics && r.fetchMetrics.length > 0 ? { fetchMetrics: r.fetchMetrics } : {}),
       };
     }
     if (r.status === "skipped") {

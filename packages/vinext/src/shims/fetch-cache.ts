@@ -665,6 +665,27 @@ function createPatchedFetch(): typeof globalThis.fetch {
         // production default, which is to cache them (same as force-cache).
         // Fall through to the caching path below with implicit force-cache TTL.
       } else {
+        // Pass-through with no caching. Record a metric when prerender metrics
+        // collection is active (mirrors Next.js diagnostics which logs all fetches
+        // during static generation, not just cached ones).
+        if (_gm[_METRICS_KEY]) {
+          const _ptUrl =
+            typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+          const _ptStart = Date.now();
+          const _ptResp = await _getEffectiveFetch()(input, init);
+          _recordFetchMetric(
+            {
+              url: _ptUrl,
+              status: _ptResp.status,
+              cacheStatus: "MISS",
+              start: _ptStart,
+              end: Date.now(),
+              cacheReason: "no cache options",
+            },
+            true, // dedupeByUrl: probe + render both call this for uncached fetches
+          );
+          return _ptResp;
+        }
         return _getEffectiveFetch()(input, init);
       }
     }
@@ -673,12 +694,11 @@ function createPatchedFetch(): typeof globalThis.fetch {
     // Page-level force-cache overrides these individual-fetch bypass conditions.
     // Mark dynamic usage so the page response gets Cache-Control: no-store,
     // preventing the prerender phase from incorrectly ISR-seeding the page.
+    // NOTE: next.revalidate === false means "cache permanently" in Next.js,
+    // NOT "no-store". Only revalidate === 0 or cache: 'no-store' opt out.
     if (
       !pageForceCacheAll &&
-      (cacheDirective === "no-store" ||
-        cacheDirective === "no-cache" ||
-        nextOpts?.revalidate === false ||
-        nextOpts?.revalidate === 0)
+      (cacheDirective === "no-store" || cacheDirective === "no-cache" || nextOpts?.revalidate === 0)
     ) {
       // no-store / revalidate:0 fetches make the page dynamic — mark it so
       // the response policy emits Cache-Control: no-store.
@@ -695,6 +715,7 @@ function createPatchedFetch(): typeof globalThis.fetch {
     // caching by using `cache: 'force-cache'` or `next: { revalidate: N }`.
     const hasExplicitCacheOpt =
       cacheDirective === "force-cache" ||
+      nextOpts?.revalidate === false ||
       (typeof nextOpts?.revalidate === "number" && nextOpts.revalidate > 0);
     if (!hasExplicitCacheOpt && hasAuthHeaders(input, init)) {
       const cleanInit = stripNextFromInit(init);
@@ -705,9 +726,12 @@ function createPatchedFetch(): typeof globalThis.fetch {
     let revalidateSeconds: number;
     if (
       cacheDirective === "force-cache" ||
+      nextOpts?.revalidate === false ||
       (!nextOpts && !cacheDirective && pageFetchCachePolicy === "default-cache")
     ) {
-      // force-cache / default-cache with no explicit options: cache indefinitely.
+      // force-cache / revalidate:false / default-cache: cache indefinitely.
+      // next: { revalidate: false } is Next.js's way of saying "cache permanently"
+      // (equivalent to force-cache, no expiration). This is NOT the same as no-store.
       revalidateSeconds =
         nextOpts?.revalidate && typeof nextOpts.revalidate === "number"
           ? nextOpts.revalidate
@@ -771,6 +795,11 @@ function createPatchedFetch(): typeof globalThis.fetch {
       }
     }
 
+    // Capture the URL string once for metrics recording.
+    const _fetchUrl =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const _mStart = Date.now();
+
     // Try cache first
     try {
       const cached = await handler.get(cacheKey, {
@@ -817,6 +846,14 @@ function createPatchedFetch(): typeof globalThis.fetch {
             .catch(() => {});
         }
 
+        _recordFetchMetric({
+          url: _fetchUrl,
+          status: cachedData.status ?? 200,
+          cacheStatus: "HIT",
+          start: _mStart,
+          end: Date.now(),
+          cacheReason: "fetch cache hit",
+        });
         return res;
       }
 
@@ -912,6 +949,14 @@ function createPatchedFetch(): typeof globalThis.fetch {
         if (staleData.url) {
           Object.defineProperty(staleRes, "url", { value: staleData.url, configurable: true });
         }
+        _recordFetchMetric({
+          url: _fetchUrl,
+          status: staleData.status ?? 200,
+          cacheStatus: "STALE",
+          start: _mStart,
+          end: Date.now(),
+          cacheReason: "stale-while-revalidate",
+        });
         return staleRes;
       }
     } catch (cacheErr) {
@@ -920,8 +965,17 @@ function createPatchedFetch(): typeof globalThis.fetch {
     }
 
     // Cache miss — fetch from network
+    const _netStart = Date.now();
     const cleanInit = stripNextFromInit(init);
     const response = await _getEffectiveFetch()(input, cleanInit);
+    _recordFetchMetric({
+      url: _fetchUrl,
+      status: response.status,
+      cacheStatus: "MISS",
+      start: _netStart,
+      end: Date.now(),
+      cacheReason: "fetch cache miss",
+    });
 
     // Only cache 200 responses
     if (response.status === 200) {
@@ -1076,4 +1130,85 @@ export function ensureFetchPatch(): void {
  */
 export function getOriginalFetch(): typeof globalThis.fetch {
   return originalFetch;
+}
+
+// ─── Prerender fetch metrics collection ──────────────────────────────────────
+//
+// When enabled (via enablePrerenderMetricsCollection), every cacheable fetch
+// call records a metric entry keyed by the current page's navPathname.
+// Callers (prerender.ts) consume per-page metrics via consumePrerenderFetchMetrics().
+
+/** Single fetch metric entry as logged to diagnostics/fetch-metrics.json. */
+export type PrerenderFetchMetric = {
+  url: string;
+  status: number;
+  /** 'HIT' | 'MISS' — whether the response came from cache */
+  cacheStatus: string;
+  /** Unix ms timestamp when the fetch started */
+  start: number;
+  /** Unix ms timestamp when the response was returned */
+  end: number;
+  /** Human-readable reason for the cache decision */
+  cacheReason: string;
+};
+
+const _METRICS_KEY = Symbol.for("vinext.prerenderFetchMetrics");
+const _gm = globalThis as unknown as Record<PropertyKey, unknown>;
+
+/** Start recording fetch metrics (called before prerender). */
+export function enablePrerenderMetricsCollection(): void {
+  _gm[_METRICS_KEY] = new Map<string, PrerenderFetchMetric[]>();
+}
+
+/** Stop recording and clear the metrics store (called in finally). */
+export function disablePrerenderMetricsCollection(): void {
+  delete _gm[_METRICS_KEY];
+}
+
+/**
+ * Discard any metrics recorded so far for a specific pathname without returning them.
+ * Called in app-page-render.ts just before renderToReadableStream() so that
+ * probe-phase metrics are excluded from the final output — matching Next.js which
+ * has no separate probe phase and only records metrics from the RSC render.
+ */
+export function clearPrerenderFetchMetricsForPath(pathname: string): void {
+  const store = _gm[_METRICS_KEY] as Map<string, PrerenderFetchMetric[]> | undefined;
+  if (!store) return;
+  store.delete(pathname);
+}
+
+/**
+ * Return and remove the recorded metrics for a specific pathname.
+ * Used by renderUrl() in prerender.ts to collect per-page metrics.
+ */
+export function consumePrerenderFetchMetrics(pathname: string): PrerenderFetchMetric[] {
+  const store = _gm[_METRICS_KEY] as Map<string, PrerenderFetchMetric[]> | undefined;
+  if (!store) return [];
+  const metrics = store.get(pathname) ?? [];
+  store.delete(pathname);
+  return metrics;
+}
+
+/**
+ * Internal: record a single metric for the current render's navPathname.
+ *
+ * @param dedupeByUrl - When true, skip recording if the same URL has already
+ *   been recorded for this pathname. Used for pass-through (uncached) fetches
+ *   to avoid double-counting if the same uncached URL is fetched multiple
+ *   times within a single render (e.g. via React Suspense retries or parallel
+ *   fetches). Not used for cached fetches (HIT/MISS) which are always distinct
+ *   diagnostic entries.
+ */
+function _recordFetchMetric(metric: PrerenderFetchMetric, dedupeByUrl = false): void {
+  const store = _gm[_METRICS_KEY] as Map<string, PrerenderFetchMetric[]> | undefined;
+  if (!store) return;
+  const navPathname = getNavigationContext()?.pathname;
+  if (!navPathname) return;
+  const existing = store.get(navPathname);
+  if (existing) {
+    if (dedupeByUrl && existing.some((m) => m.url === metric.url)) return;
+    existing.push(metric);
+  } else {
+    store.set(navPathname, [metric]);
+  }
 }

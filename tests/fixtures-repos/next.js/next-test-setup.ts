@@ -1334,6 +1334,25 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
       });
     }
 
+    /**
+     * Generate .next/diagnostics/fetch-metrics.json content from vinext-prerender.json.
+     * Returns a JSON string mapping pathname → PrerenderFetchMetric[].
+     * Returns null if no prerender index is available.
+     */
+    function generateFetchMetricsJson(): string | null {
+      const idx = getPrerenderIndex();
+      if (!idx || !Array.isArray(idx.routes)) return null;
+      const result: Record<string, unknown[]> = {};
+      for (const r of idx.routes as Array<Record<string, unknown>>) {
+        if (r.status !== "rendered") continue;
+        if (!Array.isArray(r.fetchMetrics) || r.fetchMetrics.length === 0) continue;
+        // Use concrete path when present (dynamic routes), otherwise route pattern.
+        const pathname = typeof r.path === "string" ? r.path : (r.route as string);
+        result[pathname] = r.fetchMetrics as unknown[];
+      }
+      return JSON.stringify(result);
+    }
+
     const origReadFile = next.readFile.bind(next);
     next.readFile = async (filePath: string) => {
       // .next/prerender-manifest.json — return a stub so tests that only need
@@ -1348,6 +1367,12 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
           notFoundRoutes: [],
           preview: { previewModeId: "", previewModeSigningKey: "", previewModeEncryptionKey: "" },
         });
+      }
+
+      // .next/diagnostics/fetch-metrics.json — generate from vinext-prerender.json.
+      if (filePath === ".next/diagnostics/fetch-metrics.json") {
+        const metrics = generateFetchMetricsJson();
+        if (metrics !== null) return metrics;
       }
 
       // .next/server/app/**.meta — generate from vinext-prerender.json.
@@ -1375,6 +1400,11 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     };
     const origReadJSON = next.readJSON.bind(next);
     next.readJSON = async (filePath: string) => {
+      // .next/diagnostics/fetch-metrics.json — generate from vinext-prerender.json.
+      if (filePath === ".next/diagnostics/fetch-metrics.json") {
+        const metrics = generateFetchMetricsJson();
+        if (metrics !== null) return JSON.parse(metrics);
+      }
       // Intercept .meta reads via readJSON too
       const metaMatch = filePath.match(/^\.next\/server\/app\/(.+)\.meta$/);
       if (metaMatch) {

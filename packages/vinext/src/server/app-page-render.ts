@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { CachedAppPageValue } from "../shims/cache.js";
-import { getMinFetchRevalidate } from "../shims/fetch-cache.js";
+import { clearPrerenderFetchMetricsForPath, getMinFetchRevalidate } from "../shims/fetch-cache.js";
 import { getDynamicUsageReason } from "../shims/headers.js";
 import {
   finalizeAppPageHtmlCacheResponse,
@@ -156,6 +156,13 @@ export async function renderAppPageLifecycle(
   const compileEnd = options.isProduction ? undefined : performance.now();
   const baseOnError = options.createRscOnErrorHandler(options.cleanPathname, options.routePattern);
   const rscErrorTracker = createAppPageRscErrorTracker(baseOnError);
+
+  // Clear any fetch metrics accumulated during the probe phase so that only
+  // RSC-render metrics are captured. The probe runs components to detect
+  // notFound/redirect early, but those executions are an implementation detail
+  // of vinext — Next.js only records metrics from the RSC render pass.
+  clearPrerenderFetchMetricsForPath(options.cleanPathname);
+
   const rscStream = options.renderToReadableStream(options.element, {
     onError: rscErrorTracker.onRenderError,
   });

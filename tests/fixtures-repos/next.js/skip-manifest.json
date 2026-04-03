@@ -16,7 +16,6 @@
         "$mode_start:should output HTML/RSC files for static paths",
         "$mode_start:should have correct prerender-manifest entries",
 
-        "$mode_start:should log fetch metrics to the diagnostics directory",
         "$mode_start:should stream properly for '/stale-cache-serving-edge/app-page'"
       ],
       "*": ["*"]

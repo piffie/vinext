@@ -952,6 +952,12 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
   let _buildOutput = "";
   let _httpServer: import("node:http").Server | null = null;
 
+  // Set process.cwd() to the fixture source directory so that pages that
+  // use process.cwd() to locate runtime data files (e.g. isr-error-handling/error.txt)
+  // find them at the expected path. Restored in doStop().
+  const _origCwd = process.cwd();
+  process.chdir(opts.files);
+
   try {
     // Capture build output
     const origLog = console.log.bind(console);
@@ -1181,11 +1187,40 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
     // bound port so those pages can reach the local API routes.
     process.env.PORT = String(port);
 
+    // Track patched/deleted source files so they can be restored on teardown.
+    // In start mode the prod server reads files from opts.files (process.cwd()),
+    // so patchFile edits the originals. Without restoration, a modified file
+    // (e.g. error.txt patched to 'yes') would persist into the next test run
+    // and break the prerender phase of that run.
+    const _patchedFiles = new Map<string, string | null>(); // null = file didn't exist before patch
+
     async function doStop() {
       // Restore console before teardown
       console.log = origLog;
       console.warn = origWarn;
       console.error = origError;
+      // Restore any source files that were patched/deleted during tests
+      for (const [filePath, originalContent] of _patchedFiles) {
+        const abs = path.join(opts.files, filePath);
+        try {
+          if (originalContent === null) {
+            try {
+              fs.rmSync(abs);
+            } catch {
+              /* ignore */
+            }
+          } else {
+            fs.writeFileSync(abs, originalContent, "utf-8");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      _patchedFiles.clear();
+      // Restore the original working directory
+      try {
+        process.chdir(_origCwd);
+      } catch {}
       delete process.env.PORT;
       delete (globalThis as Record<PropertyKey, unknown>)[Symbol.for("vinext.fetchCache.override")];
       await new Promise<void>((resolve) => _httpServer?.close(() => resolve()) ?? resolve());
@@ -1201,6 +1236,35 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
       () => _buildOutput,
       tmpDir,
     );
+
+    // Override patchFile / deleteFile to track original content so doStop()
+    // can restore source files after the test. Without this, a test that patches
+    // app/isr-error-handling/error.txt to 'yes' would leave the fixture modified,
+    // causing the NEXT test run's prerender to fail with the wrong file content.
+    const origPatchFile = next.patchFile.bind(next);
+    next.patchFile = async (filePath: string, content: string) => {
+      if (!_patchedFiles.has(filePath)) {
+        const abs = path.join(opts.files, filePath);
+        try {
+          _patchedFiles.set(filePath, fs.readFileSync(abs, "utf-8"));
+        } catch {
+          _patchedFiles.set(filePath, null); // file didn't exist before patch
+        }
+      }
+      await origPatchFile(filePath, content);
+    };
+    const origDeleteFile = next.deleteFile.bind(next);
+    next.deleteFile = async (filePath: string) => {
+      if (!_patchedFiles.has(filePath)) {
+        const abs = path.join(opts.files, filePath);
+        try {
+          _patchedFiles.set(filePath, fs.readFileSync(abs, "utf-8"));
+        } catch {
+          _patchedFiles.set(filePath, null);
+        }
+      }
+      await origDeleteFile(filePath);
+    };
 
     // Provide stub Next.js manifest files so isNextStart-gated beforeAll blocks
     // don't throw when reading files that only exist in a real `next build`.
@@ -1236,6 +1300,9 @@ async function createNextStartServer(opts: NextTestSetupOptions): Promise<NextIn
 
     return next;
   } catch (err) {
+    try {
+      process.chdir(_origCwd);
+    } catch {}
     await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     throw err;
   }

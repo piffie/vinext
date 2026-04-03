@@ -675,6 +675,7 @@ function rscOnError(error, requestInfo, errorContext) {
   if (process.env.NODE_ENV === "production" && error) {
     const msg = error instanceof Error ? error.message : String(error);
     const stack = error instanceof Error ? (error.stack || "") : "";
+    console.error("[vinext] Server Component error:", msg, stack ? "\\n" + stack : "");
     return __errorDigest(msg + stack);
   }
   return undefined;

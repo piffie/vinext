@@ -2,7 +2,13 @@
   "app-dir": {
     "cache-components-errors": { "*": ["*"] },
     "app": {
-      "index.test.ts": ["$contains:window.next.__internal_src_page"]
+      "index.test.ts": [
+        "$contains:window.next.__internal_src_page",
+        "should encode chunk path correctly",
+        "$contains:should match redirects in pages correctly",
+        "should not apply client router filter on shallow",
+        "should serve polyfills for browsers that do not support modules"
+      ]
     },
     "app-static": {
       "app-static.test.ts": [

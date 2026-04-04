@@ -326,17 +326,24 @@ async function makeBrowserInstance(
   // Wait for React hydration to complete so that client-side event handlers
   // (onClick, etc.) are attached before tests start interacting with the page.
   // app-browser-entry.ts sets window.__VINEXT_HYDRATED_AT after hydration.
-  await page
+  const didHydrate = await page
     .waitForFunction(
       () => typeof (window as Record<string, unknown>).__VINEXT_HYDRATED_AT === "number",
       {
         timeout: 15_000,
       },
     )
-    .catch(() => {
-      // If not an RSC page (e.g. Pages Router or static), hydration marker
-      // won't be set — fall through silently and let the test proceed.
-    });
+    .then(() => true)
+    .catch(() => false);
+
+  // After the hydration marker is set, React useEffect callbacks may still be
+  // pending (scheduled via MessageChannel, which fires asynchronously). A brief
+  // sleep gives them time to run and commit state updates (e.g. counters
+  // incremented via useEffect on mount) before the test reads the DOM.
+  // 60ms is enough for two rAF cycles — effects typically flush within 5ms.
+  if (didHydrate) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 60));
+  }
 
   const instance: BrowserInstance = {
     get page() {

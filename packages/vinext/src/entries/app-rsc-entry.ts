@@ -1035,15 +1035,15 @@ async function buildPageElements(route, params, routePath, opts, searchParams, i
     // when the query string is empty -- pages that do "await searchParams" need
     // it to be a thenable rather than undefined.
     pageProps.searchParams = makeThenableParams(spObj);
-    // If the URL has query parameters, mark the page as dynamic.
-    // In Next.js, only accessing the searchParams prop signals dynamic usage,
-    // but a Proxy-based approach doesn't work here because React's RSC debug
-    // serializer accesses properties on all props (e.g. $$typeof check in
-    // isClientReference), triggering the Proxy even when user code doesn't
-    // read searchParams. Checking for non-empty query params is a safe
-    // approximation: pages with query params in the URL are almost always
-    // dynamic, and this avoids false positives from React internals.
-    if (hasSearchParams) markDynamicUsage();
+    // Mark the render as dynamic whenever searchParams is provided. In Next.js,
+    // accessing the searchParams prop via a Proxy triggers dynamic rendering.
+    // We cannot use a Proxy here because React's RSC debug serializer accesses
+    // properties on all props ($$typeof, etc.), causing false positives.
+    // Instead, we unconditionally mark dynamic: any page that receives
+    // searchParams is request-dependent, even when the first request has an
+    // empty query string. Without this, the empty-query render would be cached
+    // and replayed to later requests with different query parameters.
+    markDynamicUsage();
   }
   const __mountedSlotsHeader = __normalizeMountedSlotsHeader(
     request?.headers?.get("x-vinext-mounted-slots"),

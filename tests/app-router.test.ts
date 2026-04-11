@@ -2350,8 +2350,21 @@ describe("App Router Production server self-hosted next/font/google headers", ()
     // of the bug. Returning CSS with already-relative URLs would sidestep
     // the failure mode.
     const originalFetch = globalThis.fetch;
+    // Normalize every `fetch()` input shape to a plain URL string so the
+    // mock can match by substring. The build plugin currently always
+    // passes string URLs, but `globalThis.fetch` accepts `RequestInfo |
+    // URL` and a future change (or test helper) passing a `Request` or
+    // `URL` instance would otherwise be coerced to `[object Request]`
+    // by `String()` and silently skip the mock branches, falling through
+    // to a real network request for Google Fonts.
+    const resolveFetchUrl = (input: unknown): string => {
+      if (typeof input === "string") return input;
+      if (input instanceof URL) return input.toString();
+      if (typeof Request !== "undefined" && input instanceof Request) return input.url;
+      return String(input);
+    };
     globalThis.fetch = async (input: unknown) => {
-      const url = typeof input === "string" ? input : String(input);
+      const url = resolveFetchUrl(input);
       if (url.includes("fonts.googleapis.com")) {
         const isMono = url.includes("Geist+Mono") || url.includes("Geist%20Mono");
         const family = isMono ? "Geist Mono" : "Geist";

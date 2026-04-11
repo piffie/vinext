@@ -80,21 +80,37 @@ export const VINEXT_FONT_URL_NAMESPACE = "_vinext_fonts";
  * (e.g. `/home/user/project/.vinext/fonts/geist-<hash>/geist-<hash>.woff2`)
  * and any production request fetches `<origin>/home/user/...` → 404.
  *
+ * `assetsDir` must match whatever Vite has resolved for
+ * `build.assetsDir` on the client environment — otherwise the embedded
+ * CSS URLs and the files emitted by the `writeBundle` hook would diverge
+ * and a user who customizes `build.assetsDir` (e.g. to `"static"`) would
+ * see 404s on every preload. The call site in `injectSelfHostedCss`
+ * passes the resolved value through from plugin state. The default is
+ * kept only so the exported helper can be driven directly from unit
+ * tests without synthesizing a full plugin context.
+ *
  * Uses split/join rather than regex because `cacheDir` is an absolute
  * filesystem path that may contain regex metacharacters on unusual
  * filesystems.
  */
-export function _rewriteCachedFontCssToServedUrls(css: string, cacheDir: string): string {
+export function _rewriteCachedFontCssToServedUrls(
+  css: string,
+  cacheDir: string,
+  assetsDir: string = DEFAULT_ASSETS_DIR,
+): string {
   if (!cacheDir || !css.includes(cacheDir)) return css;
-  return css.split(cacheDir).join(`/${DEFAULT_ASSETS_DIR}/${VINEXT_FONT_URL_NAMESPACE}`);
+  const prefix = assetsDir || DEFAULT_ASSETS_DIR;
+  return css.split(cacheDir).join(`/${prefix}/${VINEXT_FONT_URL_NAMESPACE}`);
 }
 
 /**
- * Default Vite `build.assetsDir` — mirrors Vite's own default. Used to
- * build the served URL prefix in `_rewriteCachedFontCssToServedUrls` so
- * the constant does not depend on plugin state. The matching `writeBundle`
- * hook reads the real `envConfig.build.assetsDir` from Vite and will
- * fall back to this value when it is unset.
+ * Default Vite `build.assetsDir` — mirrors Vite's own default. Used as
+ * the fallback for the `assetsDir` parameter of
+ * `_rewriteCachedFontCssToServedUrls` so the exported helper can be unit
+ * tested without synthesizing plugin state. Production call sites thread
+ * the real `envConfig.build.assetsDir` resolved by Vite through so that
+ * the embedded CSS URLs always match the directory the `writeBundle`
+ * hook copies the font files into.
  */
 const DEFAULT_ASSETS_DIR = "assets";
 
@@ -610,6 +626,14 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
         if (!code.includes("next/font/google")) return null;
         if (id.startsWith(shimsDir)) return null;
 
+        // Read the resolved `build.assetsDir` from the current Vite
+        // environment so it can be closed over by the inner
+        // `injectSelfHostedCss` helper (a plain function declaration
+        // where `this` is untyped). Captured at the top of the hook so
+        // a single handler invocation always threads one consistent
+        // value through every font-loader call site it rewrites.
+        const transformAssetsDir = this.environment?.config?.build?.assetsDir ?? DEFAULT_ASSETS_DIR;
+
         const s = new MagicString(code);
         let hasChanges = false;
         let proxyImportCounter = 0;
@@ -771,7 +795,20 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
           // the browser can actually resolve. The plugin's writeBundle hook
           // copies the referenced font files to the matching location under
           // the client output directory so the URLs serve 200s, not 404s.
-          const servedCSS = _rewriteCachedFontCssToServedUrls(localCSS, cacheDir);
+          //
+          // `transformAssetsDir` is captured at the top of the outer
+          // transform handler (where `this.environment` is bound by
+          // Rollup to the plugin context) and closed over here. This
+          // keeps the embedded URL prefix in lockstep with the directory
+          // the writeBundle hook copies files into, so a user who
+          // customizes `build.assetsDir` (e.g. to `"static"`) sees both
+          // the CSS and the copy target move together — otherwise the
+          // rewritten URLs would 404 in production.
+          const servedCSS = _rewriteCachedFontCssToServedUrls(
+            localCSS,
+            cacheDir,
+            transformAssetsDir,
+          );
 
           // Inject _selfHostedCSS into the options object
           const escapedCSS = JSON.stringify(servedCSS);
@@ -879,12 +916,27 @@ export function createGoogleFontsPlugin(fontGoogleShimPath: string, shimsDir: st
       handler(outputOptions: { dir?: string }) {
         // Only copy on the client build — the server/SSR environments
         // don't serve static assets.
+        //
+        // Optional chaining on `this.environment` matches the convention
+        // used by the other build-time plugins in `src/index.ts` (the
+        // `vinext:precompress` and `vinext:cloudflare-build` plugins both
+        // guard on `this.environment?.name !== "client"`). Vite 6+ always
+        // populates `this.environment` inside writeBundle, but keeping
+        // the guard makes the hook safely no-op if the code is ever
+        // executed in a context where Rollup invokes it without a bound
+        // environment (e.g. a thin unit test harness that invokes the
+        // hook directly). Concretely: under normal Vite builds this
+        // always resolves, the early-return is never taken.
         if (this.environment?.name !== "client") return;
         if (!cacheDir || !fs.existsSync(cacheDir)) return;
         const outDir = outputOptions.dir;
         if (!outDir) return;
 
-        const assetsDir = this.environment?.config?.build?.assetsDir ?? DEFAULT_ASSETS_DIR;
+        // Read the resolved `build.assetsDir` from the same environment
+        // that the transform-time rewrite read it from, so the embedded
+        // URL prefix and the physical copy location cannot diverge even
+        // if a user customizes `build.assetsDir`.
+        const assetsDir = this.environment.config?.build?.assetsDir ?? DEFAULT_ASSETS_DIR;
         const targetRoot = path.join(outDir, assetsDir, VINEXT_FONT_URL_NAMESPACE);
 
         // Recursive copy of every cached font file. Skip the companion

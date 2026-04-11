@@ -846,6 +846,42 @@ describe("_rewriteCachedFontCssToServedUrls", () => {
     const css = "src: url(/home/user/project/.vinext/fonts/geist/a.woff2);";
     expect(rewriteCachedFontCssToServedUrls(css, "")).toBe(css);
   });
+
+  it("uses a custom assetsDir when passed through from plugin state", () => {
+    // Regression for a bug where the helper hardcoded the default
+    // `assets` directory into the URL prefix while the `writeBundle`
+    // hook read the real `envConfig.build.assetsDir` from Vite — a user
+    // who customized `build.assetsDir` (e.g. to `"static"`) would see
+    // the embedded CSS point at `/assets/_vinext_fonts/...` while the
+    // physical files landed in `<outDir>/static/_vinext_fonts/...`, so
+    // every preload would 404 in production.
+    //
+    // The fix threads the resolved `assetsDir` through as a third
+    // argument from `injectSelfHostedCss` at the call site. This test
+    // exercises the threaded path and asserts the URL prefix tracks it.
+    const cacheDir = "/home/user/project/.vinext/fonts";
+    const css =
+      "src: url(/home/user/project/.vinext/fonts/geist-abc/geist-def.woff2) format('woff2');";
+
+    const out = rewriteCachedFontCssToServedUrls(css, cacheDir, "static");
+
+    expect(out).toBe("src: url(/static/_vinext_fonts/geist-abc/geist-def.woff2) format('woff2');");
+    expect(out).not.toContain("/assets/");
+  });
+
+  it("falls back to the default assetsDir when an empty string is passed", () => {
+    // Guard against a misconfigured environment passing `""` — never
+    // construct a URL of the form `//`. The helper falls back to the
+    // default `assets` prefix so the URL always has a real directory
+    // segment between the root and the `_vinext_fonts` namespace.
+    const cacheDir = "/root/.vinext/fonts";
+    const css = "src: url(/root/.vinext/fonts/geist/a.woff2);";
+
+    const out = rewriteCachedFontCssToServedUrls(css, cacheDir, "");
+
+    expect(out).toBe("src: url(/assets/_vinext_fonts/geist/a.woff2);");
+    expect(out).not.toContain("//_vinext_fonts");
+  });
 });
 
 // ── parseStaticObjectLiteral security tests ───────────────────

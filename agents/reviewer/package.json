@@ -1,0 +1,17 @@
+{
+	"name": "@agents/reviewer",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "flue run review --target node"
+	},
+	"dependencies": {
+		"@flue/cli": "catalog:",
+		"@flue/sdk": "catalog:",
+		"just-bash": "catalog:",
+		"valibot": "catalog:"
+	},
+	"devDependencies": {
+		"typescript": "catalog:"
+	}
+}

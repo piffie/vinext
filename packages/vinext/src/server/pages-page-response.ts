@@ -1,6 +1,10 @@
 import React, { type ComponentType, type ReactNode } from "react";
 import { minifyStyledJsxCss } from "../plugins/styled-jsx.js";
+import { _runWithCacheState } from "../shims/cache.js";
+import { runWithPrivateCache } from "../shims/cache-runtime.js";
+import { runWithFetchCache } from "../shims/fetch-cache.js";
 import { renderHeadNodesToHTML } from "../shims/head.js";
+import { runWithServerInsertedHTMLState } from "../shims/navigation-state.js";
 import { withScriptNonce } from "../shims/script-nonce-context.js";
 import { createNonceAttribute, escapeHtmlAttr } from "./html.js";
 import { getClientTraceMetadataHtml } from "./trace-metadata.js";
@@ -420,6 +424,12 @@ function buildWeakHtmlEtag(html: string): string {
   return `W/"${html.length.toString(16)}-${(hash >>> 0).toString(16)}"`;
 }
 
+function runWithFreshPagesRenderState<T>(fn: () => Promise<T>): Promise<T> {
+  return runWithServerInsertedHTMLState(() =>
+    _runWithCacheState(() => runWithPrivateCache(() => runWithFetchCache(fn))),
+  );
+}
+
 export function normalizePagesInlineStyleTags(html: string): string {
   const bodyIndex = html.search(/<body\b/i);
   if (bodyIndex === -1) return html;
@@ -450,8 +460,10 @@ export async function renderPagesPageResponse(
   const pageElement = createPageElement();
 
   options.resetSSRHead?.();
-  if (options.renderHeadPrepassToStringAsync) {
-    await options.renderHeadPrepassToStringAsync(createPageElement());
+  if (options.renderHeadPrepassToStringAsync && options.shouldBufferResponse) {
+    await runWithFreshPagesRenderState(() =>
+      options.renderHeadPrepassToStringAsync!(createPageElement()),
+    );
   }
   const pageHeadHTML = options.getSSRHeadHTML?.() ?? "";
   const documentHeadHTML = getDocumentHeadHTML(options.documentProps);
@@ -517,8 +529,9 @@ export async function renderPagesPageResponse(
   const markerIndex = shellHtml.indexOf(bodyMarker);
   const shellPrefix = shellHtml.slice(0, markerIndex);
   const shellSuffix = shellHtml.slice(markerIndex + bodyMarker.length);
-  const bodyStream = await options.renderToReadableStream(pageElement);
-  await bodyStream.allReady;
+  const bodyStream = await runWithFreshPagesRenderState(() =>
+    options.renderToReadableStream(pageElement),
+  );
 
   if (
     // Keep nonce-bearing pages out of ISR writes: rewritePagesCachedHtml()

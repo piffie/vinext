@@ -512,6 +512,7 @@ function createKey(): string {
 
 function canUseManualScrollRestoration(): boolean {
   if (!__scrollRestoration || typeof window === "undefined") return false;
+  if (!window.history) return false;
   if (!("scrollRestoration" in window.history)) return false;
   try {
     const testKey = "__vinext_scroll_test";
@@ -526,7 +527,7 @@ function canUseManualScrollRestoration(): boolean {
 const manualScrollRestoration = canUseManualScrollRestoration();
 let _historyKey =
   typeof window !== "undefined" &&
-  window.history.state &&
+  window.history?.state &&
   typeof window.history.state === "object" &&
   typeof (window.history.state as { key?: unknown }).key === "string"
     ? (window.history.state as { key: string }).key
@@ -1872,7 +1873,7 @@ function ensureInitialPagesHistoryState(): void {
 // Module-level popstate listener: handles browser back/forward by re-rendering
 // the React root with the page at the new URL. This runs regardless of whether
 // any component calls useRouter().
-if (typeof window !== "undefined") {
+if (typeof window !== "undefined" && window.history) {
   ensureInitialPagesHistoryState();
   if (manualScrollRestoration) {
     window.history.scrollRestoration = "manual";

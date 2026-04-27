@@ -3005,12 +3005,12 @@ describe("Production server middleware (Pages Router)", () => {
     const html = await res.text();
     expect(html).toContain('<script nonce="pages-prod">window.__NEXT_DATA__ = ');
     expect(html).toMatch(
-      /<script type="module" nonce="pages-prod" src="\/assets\/(?:index|_virtual_vinext-client-entry)-[^"]+\.js" crossorigin><\/script>/,
+      /<script type="module" nonce="pages-prod" defer src="\/assets\/(?:index|_virtual_vinext-client-entry)-[^"]+\.js" crossorigin><\/script>/,
     );
     expect(html).toMatch(
       /<link rel="modulepreload" nonce="pages-prod" href="\/assets\/(?:index|_virtual_vinext-client-entry)-[^"]+\.js" \/>/,
     );
-    expect(html).toMatch(/<script type="module" nonce="pages-prod" src="\/[^"]+"/);
+    expect(html).toMatch(/<script type="module" nonce="pages-prod" defer src="\/[^"]+"/);
     expect(html).toMatch(/<link rel="modulepreload" nonce="pages-prod" href="\/[^"]+"/);
   });
 

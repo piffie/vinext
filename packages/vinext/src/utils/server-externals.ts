@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 
-export const DEFAULT_NODE_NATIVE_SERVER_EXTERNALS = ["better-sqlite3", "sqlite3", "typescript"];
+const DEFAULT_NODE_NATIVE_SERVER_EXTERNALS = ["better-sqlite3", "sqlite3", "typescript"];
 
 type PackageExportsValue =
   | string
@@ -23,7 +23,7 @@ function parseBarePackageSpecifier(
   };
 }
 
-export function getBarePackageName(specifier: string): string | null {
+function getBarePackageName(specifier: string): string | null {
   if (
     !specifier ||
     specifier.startsWith(".") ||

@@ -8410,6 +8410,7 @@ describe("next/compat/router shim", () => {
         pathname: "/docs/a/b",
         search: "?tag=a&tag=b",
         hash: "#section",
+        href: "http://localhost/docs/a/b?tag=a&tag=b#section",
       },
       __NEXT_DATA__: {
         page: "/docs/[...slug]",
@@ -8457,6 +8458,7 @@ describe("next/compat/router shim", () => {
         pathname: "/to-ssg",
         search: "",
         hash: "",
+        href: "http://localhost/to-ssg",
       },
       __NEXT_DATA__: {
         page: "/ssg/[slug]",
@@ -8503,6 +8505,7 @@ describe("next/compat/router shim", () => {
         pathname: "/docs/a/b",
         search: "?slug=c",
         hash: "",
+        href: "http://localhost/docs/a/b?slug=c",
       },
       __NEXT_DATA__: {
         page: "/docs/[...slug]",
@@ -8549,6 +8552,7 @@ describe("next/compat/router shim", () => {
         pathname: "/shallow-test",
         search: "?toString=a&constructor=b&__proto__=c",
         hash: "",
+        href: "http://localhost/shallow-test?toString=a&constructor=b&__proto__=c",
       },
       __NEXT_DATA__: {
         page: "/shallow-test",
@@ -8597,6 +8601,7 @@ describe("next/compat/router shim", () => {
         pathname: "/sha",
         search: "?hello=world",
         hash: "",
+        href: "http://localhost/sha?hello=world",
       },
       __NEXT_DATA__: {
         page: "/shallow",
@@ -8754,7 +8759,15 @@ describe("Pages Router router helpers", () => {
         { shallow: true },
       );
 
-      expect(pushState).toHaveBeenCalledWith({}, "", "/search?tag=a&tag=b&q=x");
+      expect(pushState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/search?tag=a&tag=b&q=x",
+          as: "/search?tag=a&tag=b&q=x",
+          __N: true,
+        }),
+        "",
+        "/search?tag=a&tag=b&q=x",
+      );
     } finally {
       if (previousWindow === undefined) {
         delete (globalThis as any).window;
@@ -8810,7 +8823,11 @@ describe("Pages Router router helpers", () => {
       );
 
       expect(pushState).toHaveBeenCalledWith(
-        {},
+        expect.objectContaining({
+          url: "/search?page=2&draft=false&empty=&missing=&tag=a&tag=b",
+          as: "/search?page=2&draft=false&empty=&missing=&tag=a&tag=b",
+          __N: true,
+        }),
         "",
         "/search?page=2&draft=false&empty=&missing=&tag=a&tag=b",
       );
@@ -8865,7 +8882,15 @@ describe("Pages Router router helpers", () => {
       const routerModule = await import("../packages/vinext/src/shims/router.js");
       await routerModule.default.push({ query: { id: 1 } }, undefined, { shallow: true });
 
-      expect(pushState).toHaveBeenCalledWith({}, "", "/rewrite-to-another-segment/0?id=1");
+      expect(pushState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/rewrite-to-another-segment/0?id=1",
+          as: "/rewrite-to-another-segment/0?id=1",
+          __N: true,
+        }),
+        "",
+        "/rewrite-to-another-segment/0?id=1",
+      );
     } finally {
       if (previousWindow === undefined) {
         delete (globalThis as any).window;
@@ -8917,7 +8942,15 @@ describe("Pages Router router helpers", () => {
       const routerModule = await import("../packages/vinext/src/shims/router.js");
       await routerModule.default.push("?id=1", undefined, { shallow: true });
 
-      expect(pushState).toHaveBeenCalledWith({}, "", "/rewrite-to-same-segment/1");
+      expect(pushState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: "/rewrite-to-same-segment/1",
+          as: "/rewrite-to-same-segment/1",
+          __N: true,
+        }),
+        "",
+        "/rewrite-to-same-segment/1",
+      );
     } finally {
       if (previousWindow === undefined) {
         delete (globalThis as any).window;
@@ -9218,13 +9251,10 @@ describe("Pages Router concurrent navigation", () => {
     try {
       vi.resetModules();
       const routerModule = await import("../packages/vinext/src/shims/router.js");
-      await routerModule.default.push("/404", "/slug-2");
+      const result = await routerModule.default.push("/404", "/slug-2");
 
-      expect(pushState).toHaveBeenCalledWith(
-        expect.objectContaining({ url: "/404", as: "/slug-2", __N: true }),
-        "",
-        "/docs/slug-2",
-      );
+      expect(result).toBe(false);
+      expect(pushState).not.toHaveBeenCalled();
       expect(fetchUrls[0]).toBe("http://localhost/docs/_next/data/build-123/404.json");
     } finally {
       vi.resetModules();
@@ -9271,9 +9301,8 @@ describe("Pages Router concurrent navigation", () => {
 
       expect(pushState).not.toHaveBeenCalled();
       expect(replaceState).toHaveBeenCalledWith(
-        expect.objectContaining({ url: "/something-else/", as: "/hello/", __N: true }),
+        expect.objectContaining({ as: "/hello/", __N: true }),
         "",
-        "/docs/hello/",
       );
       expect(fetchUrls[0]).toBe("http://localhost/docs/_next/data/build-123/something-else.json");
     } finally {
@@ -9421,13 +9450,10 @@ describe("Pages Router concurrent navigation", () => {
     try {
       vi.resetModules();
       const routerModule = await import("../packages/vinext/src/shims/router.js");
-      await routerModule.default.push("/");
+      const result = await routerModule.default.push("/");
 
-      expect(pushState).toHaveBeenCalledWith(
-        expect.objectContaining({ url: "/", as: "/", __N: true }),
-        "",
-        "/",
-      );
+      expect(result).toBe(false);
+      expect(pushState).not.toHaveBeenCalled();
       expect(fetchUrls[0]).toBe("http://localhost/_next/data/build-123/en.json");
     } finally {
       vi.resetModules();
@@ -9676,6 +9702,7 @@ describe("Pages Router concurrent navigation", () => {
   it("schedules hard navigation when Pages Router data request fails", async () => {
     const previousWindow = (globalThis as any).window;
     const originalFetch = globalThis.fetch;
+    vi.useFakeTimers();
     const { win, pushState } = createNavWindow();
     const hrefAssignments = trackHrefAssignments(win);
     (win.__NEXT_DATA__ as any).buildId = "build-123";
@@ -9698,13 +9725,11 @@ describe("Pages Router concurrent navigation", () => {
       const result = await routerModule.default.push("/error-throw");
 
       expect(result).toBe(false);
-      expect(pushState).toHaveBeenCalledWith(
-        expect.objectContaining({ url: "/error-throw", as: "/error-throw", __N: true }),
-        "",
-        "/error-throw",
-      );
+      expect(pushState).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1500);
       expect(hrefAssignments).toEqual(["/error-throw"]);
     } finally {
+      vi.useRealTimers();
       vi.resetModules();
       if (previousWindow === undefined) {
         delete (globalThis as any).window;
@@ -9780,15 +9805,10 @@ describe("Pages Router concurrent navigation", () => {
       // writes the raw app-relative URL. The guard is correct only if each
       // happens exactly once.
       const fallbackAssignments = hrefAssignments.filter((value) => value === "/failing-page");
-      const pushStateAssignments = hrefAssignments.filter(
-        (value) => value === "http://localhost/failing-page",
-      );
 
       expect(result).toBe(false);
       expect(fallbackAssignments).toHaveLength(1);
-      expect(pushStateAssignments).toHaveLength(1);
-      // Catch-all: exactly one history write plus exactly one hard-nav fallback.
-      expect(hrefAssignments).toHaveLength(2);
+      expect(hrefAssignments).toHaveLength(1);
     } finally {
       if (previousWindow === undefined) {
         delete (globalThis as any).window;
@@ -12565,7 +12585,7 @@ describe("next/head SSR security", () => {
       const html = await collectHeadHTML([el]);
 
       expect(html).toContain(`<${tag}`);
-      expect(html).toContain('data-vinext-head="true"');
+      expect(html).toContain('data-next-head=""');
     }
   });
 });

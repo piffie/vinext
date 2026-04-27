@@ -428,7 +428,7 @@ export async function loadNextConfig(
   }
 }
 
-export function emitDeprecatedConfigWarnings(config: NextConfig): void {
+function emitDeprecatedConfigWarnings(config: NextConfig): void {
   const experimental = config.experimental as Record<string, unknown> | undefined;
 
   if (experimental && Object.hasOwn(experimental, "instrumentationHook")) {

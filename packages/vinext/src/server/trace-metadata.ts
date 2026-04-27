@@ -43,7 +43,7 @@ function isValidMetadataKey(key: string): boolean {
 async function loadOpenTelemetryApi(): Promise<OpenTelemetryApi> {
   // Keep @opentelemetry/api optional. Next apps that configure tracing install
   // it themselves; apps without it should simply render no trace metadata.
-  const specifier = "@opentelemetry/api";
+  const specifier = ["@opentelemetry", "api"].join("/");
   return import(/* @vite-ignore */ specifier) as Promise<OpenTelemetryApi>;
 }
 

@@ -231,7 +231,7 @@ function buildUrlFromParams(pattern: string, params: Record<string, string | str
   return "/" + result.join("/");
 }
 
-export type PagesStaticPathEntry =
+type PagesStaticPathEntry =
   | string
   | {
       params: Record<string, string | string[]>;

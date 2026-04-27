@@ -697,7 +697,12 @@ export function matchConfigPattern(
               tokenRe.lastIndex += 1;
               const constraint = extractConstraint(pattern, tokenRe);
               paramNames.push(name);
-              if (constraint !== null) {
+              const hasLiteralSuffix =
+                tokenRe.lastIndex < pattern.length && pattern[tokenRe.lastIndex] !== "/";
+              if (quantifier === "*" && regexStr.endsWith("/") && !hasLiteralSuffix) {
+                const capture = constraint !== null ? constraint : ".*";
+                regexStr = `${regexStr.slice(0, -1)}(?:/(${capture}))?`;
+              } else if (constraint !== null) {
                 regexStr += `(${constraint})`;
               } else {
                 regexStr += quantifier === "*" ? "(.*)" : "(.+)";

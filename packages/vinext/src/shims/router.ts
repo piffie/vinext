@@ -1068,7 +1068,7 @@ function syncI18nGlobalsFromNextData(nextData: VinextNextData): void {
  */
 async function navigateClient(
   url: string,
-  options: { allowErrorPageData?: boolean } = {},
+  options: { allowErrorPageData?: boolean; beforeRender?: () => void } = {},
 ): Promise<void> {
   if (typeof window === "undefined") return;
 
@@ -1129,6 +1129,7 @@ async function navigateClient(
     }
 
     if (dataResult.kind === "not-found") {
+      options.beforeRender?.();
       renderPagesNotFound(root);
       return;
     }
@@ -1202,6 +1203,7 @@ async function navigateClient(
       window.__NEXT_DATA__ = nextData;
       syncI18nGlobalsFromNextData(nextData);
       element = wrapWithRouterContext(element);
+      options.beforeRender?.();
       await renderPagesRoot(root, element);
       return;
     }
@@ -1268,6 +1270,7 @@ async function navigateClient(
     );
     if (!match) {
       if (res.status === 404) {
+        options.beforeRender?.();
         renderPagesNotFound(root);
         return;
       }
@@ -1364,6 +1367,7 @@ async function navigateClient(
     // Wrap with RouterContext.Provider so next/compat/router works
     element = wrapWithRouterContext(element);
 
+    options.beforeRender?.();
     await renderPagesRoot(root, element);
   })();
   _activeNavigationPromise = navigationPromise;
@@ -1395,7 +1399,7 @@ async function navigateClient(
 async function runNavigateClient(
   fullUrl: string,
   resolvedUrl: string,
-  options: { allowErrorPageData?: boolean } = {},
+  options: { allowErrorPageData?: boolean; beforeRender?: () => void } = {},
 ): Promise<"completed" | "cancelled" | "failed"> {
   try {
     await navigateClient(fullUrl, options);
@@ -1555,29 +1559,47 @@ export function useRouter(): NextRouter {
       routerEvents.emit("routeChangeStart", eventUrl, { shallow: options?.shallow ?? false });
       if (options?.shallow) {
         commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
+        setState(getPathnameAndQuery());
+        routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: true });
+        routerEvents.emit("routeChangeComplete", eventUrl, { shallow: true });
       } else {
         const committedBeforeFetch = shouldCommitQueryNavigationBeforeFetch(full);
         if (committedBeforeFetch) {
           commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
         }
         const previousBrowserUrl = getCurrentBrowserPathSearchHash();
+        let completedBeforeRender = false;
+        const completeBeforeRender = () => {
+          if (completedBeforeRender) return;
+          completedBeforeRender = true;
+          if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
+            commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
+          } else {
+            syncHistoryTrackingFromCurrent();
+          }
+          preserveTargetSearchIfRewriteDroppedIt(full);
+          setState(getPathnameAndQuery());
+          routerEvents.emit("beforeHistoryChange", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+          routerEvents.emit("routeChangeComplete", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+        };
         _pendingNavigationBrowserUrl = full;
-        const result = await runNavigateClient(routeFull, eventUrl, { allowErrorPageData });
+        const result = await runNavigateClient(routeFull, eventUrl, {
+          allowErrorPageData,
+          beforeRender: completeBeforeRender,
+        });
         if (_pendingNavigationBrowserUrl === full) {
           _pendingNavigationBrowserUrl = null;
         }
         if (result === "cancelled") return true;
         if (result === "failed") return false;
-        if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
-          commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
-        } else {
-          syncHistoryTrackingFromCurrent();
+        if (!completedBeforeRender) {
+          completeBeforeRender();
         }
-        preserveTargetSearchIfRewriteDroppedIt(full);
       }
-      setState(getPathnameAndQuery());
-      routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: options?.shallow ?? false });
-      routerEvents.emit("routeChangeComplete", eventUrl, { shallow: options?.shallow ?? false });
 
       // Scroll: handle hash target, else scroll to top unless scroll:false
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
@@ -1645,29 +1667,47 @@ export function useRouter(): NextRouter {
       routerEvents.emit("routeChangeStart", eventUrl, { shallow: options?.shallow ?? false });
       if (options?.shallow) {
         commitReplaceNavigationHistory(historyState, full);
+        setState(getPathnameAndQuery());
+        routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: true });
+        routerEvents.emit("routeChangeComplete", eventUrl, { shallow: true });
       } else {
         const committedBeforeFetch = shouldCommitQueryNavigationBeforeFetch(full);
         if (committedBeforeFetch) {
           commitReplaceNavigationHistory(historyState, full);
         }
         const previousBrowserUrl = getCurrentBrowserPathSearchHash();
+        let completedBeforeRender = false;
+        const completeBeforeRender = () => {
+          if (completedBeforeRender) return;
+          completedBeforeRender = true;
+          if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
+            commitReplaceNavigationHistory(historyState, full);
+          } else {
+            syncHistoryTrackingFromCurrent();
+          }
+          preserveTargetSearchIfRewriteDroppedIt(full);
+          setState(getPathnameAndQuery());
+          routerEvents.emit("beforeHistoryChange", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+          routerEvents.emit("routeChangeComplete", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+        };
         _pendingNavigationBrowserUrl = full;
-        const result = await runNavigateClient(routeFull, eventUrl, { allowErrorPageData });
+        const result = await runNavigateClient(routeFull, eventUrl, {
+          allowErrorPageData,
+          beforeRender: completeBeforeRender,
+        });
         if (_pendingNavigationBrowserUrl === full) {
           _pendingNavigationBrowserUrl = null;
         }
         if (result === "cancelled") return true;
         if (result === "failed") return false;
-        if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
-          commitReplaceNavigationHistory(historyState, full);
-        } else {
-          syncHistoryTrackingFromCurrent();
+        if (!completedBeforeRender) {
+          completeBeforeRender();
         }
-        preserveTargetSearchIfRewriteDroppedIt(full);
       }
-      setState(getPathnameAndQuery());
-      routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: options?.shallow ?? false });
-      routerEvents.emit("routeChangeComplete", eventUrl, { shallow: options?.shallow ?? false });
 
       // Scroll: handle hash target, else scroll to top unless scroll:false
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
@@ -1755,7 +1795,6 @@ let _beforePopStateCb: BeforePopStateCallback | undefined;
 // compare the previous value with the (already-changed) window.location.
 let _lastPathnameAndSearch =
   typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
-let _isFirstPopStateEvent = true;
 
 type NextHistoryState = {
   url?: string;
@@ -1868,8 +1907,6 @@ if (typeof window !== "undefined") {
 
   window.addEventListener("popstate", (e: PopStateEvent) => {
     const state = e.state as NextHistoryState | null;
-    const isFirstPopStateEvent = _isFirstPopStateEvent;
-    _isFirstPopStateEvent = false;
 
     if (state?.__NA) {
       window.location.reload();
@@ -1880,17 +1917,6 @@ if (typeof window !== "undefined") {
       const stateUrl = state.url ?? window.location.pathname + window.location.search;
       const stateAs = state.as ?? stateUrl;
       const stateOptions = state.options ?? {};
-      const previousAsPath = stripLocaleFromAppPathAndSearch(
-        stripBasePath(_lastPathnameAndSearch, __basePath),
-      );
-      if (
-        isFirstPopStateEvent &&
-        window.__VINEXT_LOCALE__ === stateOptions.locale &&
-        stateAs === previousAsPath
-      ) {
-        return;
-      }
-
       let forcedScroll: { x: number; y: number } | null = null;
       if (manualScrollRestoration && typeof state.key === "string" && _historyKey !== state.key) {
         saveScrollPositionToSession(_historyKey);
@@ -1910,6 +1936,17 @@ if (typeof window !== "undefined") {
       }
 
       const fullStateUrl = toBrowserNavigationHref(stateUrl, window.location.href, __basePath);
+      const browserPathAndSearch = window.location.pathname + window.location.search;
+      if (browserPathAndSearch === _lastPathnameAndSearch) {
+        const hashUrl = stripBasePath(browserPathAndSearch, __basePath) + window.location.hash;
+        routerEvents.emit("hashChangeStart", hashUrl, { shallow: false });
+        scrollToHash(window.location.hash);
+        routerEvents.emit("hashChangeComplete", hashUrl, { shallow: false });
+        restoreScrollPosition(e.state, forcedScroll);
+        dispatchVinextNavigate();
+        return;
+      }
+      _lastPathnameAndSearch = browserPathAndSearch;
       routerEvents.emit("routeChangeStart", stateAs, { shallow: stateOptions.shallow ?? false });
       routerEvents.emit("beforeHistoryChange", stateAs, {
         shallow: stateOptions.shallow ?? false,
@@ -2108,28 +2145,45 @@ const Router: NextRouterSingleton = {
       routerEvents.emit("routeChangeStart", eventUrl, { shallow: options?.shallow ?? false });
       if (options?.shallow) {
         commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
+        routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: true });
+        routerEvents.emit("routeChangeComplete", eventUrl, { shallow: true });
       } else {
         const committedBeforeFetch = shouldCommitQueryNavigationBeforeFetch(full);
         if (committedBeforeFetch) {
           commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
         }
         const previousBrowserUrl = getCurrentBrowserPathSearchHash();
+        let completedBeforeRender = false;
+        const completeBeforeRender = () => {
+          if (completedBeforeRender) return;
+          completedBeforeRender = true;
+          if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
+            commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
+          } else {
+            syncHistoryTrackingFromCurrent();
+          }
+          preserveTargetSearchIfRewriteDroppedIt(full);
+          routerEvents.emit("beforeHistoryChange", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+          routerEvents.emit("routeChangeComplete", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+        };
         _pendingNavigationBrowserUrl = full;
-        const result = await runNavigateClient(routeFull, eventUrl, { allowErrorPageData });
+        const result = await runNavigateClient(routeFull, eventUrl, {
+          allowErrorPageData,
+          beforeRender: completeBeforeRender,
+        });
         if (_pendingNavigationBrowserUrl === full) {
           _pendingNavigationBrowserUrl = null;
         }
         if (result === "cancelled") return true;
         if (result === "failed") return false;
-        if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
-          commitPushNavigationHistory(historyState, full, routeFull, as !== undefined);
-        } else {
-          syncHistoryTrackingFromCurrent();
+        if (!completedBeforeRender) {
+          completeBeforeRender();
         }
-        preserveTargetSearchIfRewriteDroppedIt(full);
       }
-      routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: options?.shallow ?? false });
-      routerEvents.emit("routeChangeComplete", eventUrl, { shallow: options?.shallow ?? false });
 
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
       if (hash) {
@@ -2194,28 +2248,45 @@ const Router: NextRouterSingleton = {
       routerEvents.emit("routeChangeStart", eventUrl, { shallow: options?.shallow ?? false });
       if (options?.shallow) {
         commitReplaceNavigationHistory(historyState, full);
+        routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: true });
+        routerEvents.emit("routeChangeComplete", eventUrl, { shallow: true });
       } else {
         const committedBeforeFetch = shouldCommitQueryNavigationBeforeFetch(full);
         if (committedBeforeFetch) {
           commitReplaceNavigationHistory(historyState, full);
         }
         const previousBrowserUrl = getCurrentBrowserPathSearchHash();
+        let completedBeforeRender = false;
+        const completeBeforeRender = () => {
+          if (completedBeforeRender) return;
+          completedBeforeRender = true;
+          if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
+            commitReplaceNavigationHistory(historyState, full);
+          } else {
+            syncHistoryTrackingFromCurrent();
+          }
+          preserveTargetSearchIfRewriteDroppedIt(full);
+          routerEvents.emit("beforeHistoryChange", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+          routerEvents.emit("routeChangeComplete", eventUrl, {
+            shallow: options?.shallow ?? false,
+          });
+        };
         _pendingNavigationBrowserUrl = full;
-        const result = await runNavigateClient(routeFull, eventUrl, { allowErrorPageData });
+        const result = await runNavigateClient(routeFull, eventUrl, {
+          allowErrorPageData,
+          beforeRender: completeBeforeRender,
+        });
         if (_pendingNavigationBrowserUrl === full) {
           _pendingNavigationBrowserUrl = null;
         }
         if (result === "cancelled") return true;
         if (result === "failed") return false;
-        if (!committedBeforeFetch && getCurrentBrowserPathSearchHash() === previousBrowserUrl) {
-          commitReplaceNavigationHistory(historyState, full);
-        } else {
-          syncHistoryTrackingFromCurrent();
+        if (!completedBeforeRender) {
+          completeBeforeRender();
         }
-        preserveTargetSearchIfRewriteDroppedIt(full);
       }
-      routerEvents.emit("beforeHistoryChange", eventUrl, { shallow: options?.shallow ?? false });
-      routerEvents.emit("routeChangeComplete", eventUrl, { shallow: options?.shallow ?? false });
 
       const hash = resolved.includes("#") ? resolved.slice(resolved.indexOf("#")) : "";
       if (hash) {

@@ -2807,7 +2807,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
               // Skip requests for files with extensions (static assets)
               let pathname = url.split("?")[0];
-              if (pathname.includes(".") && !pathname.endsWith(".html")) {
+              const isPagesDataRequest =
+                pathname.startsWith("/_next/data/") ||
+                (nextConfig?.basePath
+                  ? pathname.startsWith(`${nextConfig.basePath}/_next/data/`)
+                  : false);
+              if (pathname.includes(".") && !pathname.endsWith(".html") && !isPagesDataRequest) {
                 return next();
               }
 

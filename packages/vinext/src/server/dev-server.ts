@@ -40,6 +40,7 @@ import {
   parseCookieLocaleFromHeader,
   resolvePagesI18nRequest,
 } from "./pages-i18n.js";
+import "./edge-runtime-globals.js";
 
 /**
  * Render a React element to a string using renderToReadableStream.
@@ -901,7 +902,10 @@ hydrate();
           `window.__NEXT_DATA__ = ${safeJsonStringify({
             props: { pageProps },
             page: patternToNextFormat(route.pattern),
-            query: params,
+            query:
+              typeof pageModule.getStaticProps === "function"
+                ? params
+                : { ...params, ...parseQuery(url) },
             buildId: process.env.__VINEXT_BUILD_ID,
             isFallback: false,
             locale: locale ?? currentDefaultLocale,

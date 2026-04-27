@@ -44,7 +44,12 @@ export function resetSSRHead(): void {
 
 /** Get collected head HTML. Call after render. */
 export function getSSRHeadHTML(): string {
-  return reduceHeadChildren(_getSSRHeadChildren())
+  return renderHeadNodesToHTML(_getSSRHeadChildren());
+}
+
+/** Serialize React head nodes using the same reduction rules as next/head. */
+export function renderHeadNodesToHTML(headChildren: React.ReactNode[]): string {
+  return reduceHeadChildren(headChildren)
     .map((child) => headChildToHTML(child.type as string, child.props as Record<string, unknown>))
     .filter(Boolean)
     .join("\n  ");
@@ -237,7 +242,7 @@ function headChildToHTML(tag: string, props: Record<string, unknown>): string {
   const attrStr = attrs.length ? " " + attrs.join(" ") : "";
 
   if (SELF_CLOSING_HEAD_TAGS.has(tag)) {
-    return `<${tag}${attrStr} data-vinext-head="true" />`;
+    return `<${tag}${attrStr} data-next-head="" />`;
   }
 
   // For raw-content tags (script, style), escape closing-tag sequences so the
@@ -246,7 +251,7 @@ function headChildToHTML(tag: string, props: Record<string, unknown>): string {
     innerHTML = escapeInlineContent(innerHTML, tag);
   }
 
-  return `<${tag}${attrStr} data-vinext-head="true">${innerHTML}</${tag}>`;
+  return `<${tag}${attrStr} data-next-head="">${innerHTML}</${tag}>`;
 }
 
 function escapeHTML(s: string): string {

@@ -28,6 +28,11 @@ import { assertSafeNavigationUrl } from "./url-safety.js";
 // still line up if Vite loads this shim through multiple resolved module IDs.
 const _LAYOUT_SEGMENT_CTX_KEY = Symbol.for("vinext.layoutSegmentContext");
 const _SERVER_INSERTED_HTML_CTX_KEY = Symbol.for("vinext.serverInsertedHTMLContext");
+const LINK_STATUS_NAVIGATION_EVENT = "vinext:link-status-navigation";
+
+function notifyLinkStatusNavigationStart(): void {
+  window.dispatchEvent(new Event(LINK_STATUS_NAVIGATION_EVENT));
+}
 
 /**
  * Map of parallel route key → child segments below the current layout.
@@ -1149,7 +1154,12 @@ export async function navigateClientSide(
   mode: "push" | "replace",
   scroll: boolean,
   programmaticTransition = false,
+  deferredLoadingTransition = false,
 ): Promise<void> {
+  if (programmaticTransition) {
+    notifyLinkStatusNavigationStart();
+  }
+
   // Normalize same-origin absolute URLs to local paths for SPA navigation
   let normalizedHref = href;
   if (isExternalUrl(href)) {
@@ -1211,6 +1221,7 @@ export async function navigateClientSide(
       mode,
       undefined,
       programmaticTransition,
+      deferredLoadingTransition,
     );
   } else {
     if (mode === "replace") {
@@ -1244,6 +1255,7 @@ const _appRouter = {
   push(href: string, options?: { scroll?: boolean }): void {
     assertSafeNavigationUrl(href);
     if (isServer) return;
+    notifyLinkStatusNavigationStart();
     React.startTransition(() => {
       void navigateClientSide(href, "push", options?.scroll !== false, true);
     });
@@ -1251,6 +1263,7 @@ const _appRouter = {
   replace(href: string, options?: { scroll?: boolean }): void {
     assertSafeNavigationUrl(href);
     if (isServer) return;
+    notifyLinkStatusNavigationStart();
     React.startTransition(() => {
       void navigateClientSide(href, "replace", options?.scroll !== false, true);
     });

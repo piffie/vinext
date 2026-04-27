@@ -588,6 +588,7 @@ export async function renderPagesPageResponse(
   }
 
   if (options.shouldBufferResponse) {
+    await bodyStream.allReady;
     const bodyHtml = await new Response(bodyStream).text();
     const fullHtml = normalizePagesInlineStyleTags(shellPrefix + bodyHtml + shellSuffix);
     if (!responseHeaders.has("ETag")) {

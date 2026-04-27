@@ -346,7 +346,7 @@ describe("pages page response", () => {
     await expect(response.text()).resolves.toContain("next_streaming_data");
   });
 
-  it("waits for Pages SSR allReady so render errors can use the 500 page", async () => {
+  it("waits for buffered Pages SSR allReady so render errors can use the 500 page", async () => {
     // Ported from Next.js: test/e2e/streaming-ssr-edge/streaming-ssr-edge.test.ts
     // https://github.com/vercel/next.js/blob/canary/test/e2e/streaming-ssr-edge/streaming-ssr-edge.test.ts
     const common = createCommonOptions();
@@ -357,6 +357,7 @@ describe("pages page response", () => {
         renderToReadableStream: vi.fn(async () =>
           createReadyStream([], Promise.reject(new Error("oops"))),
         ),
+        shouldBufferResponse: true,
       }),
     ).rejects.toThrow("oops");
   });

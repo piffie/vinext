@@ -15718,8 +15718,8 @@ async function _renderPage(request, url, manifest, middlewareHeaders, isDataRequ
         return new Response("Page has no default export", { status: 500 });
       }
       const scriptNonce = __getScriptNonceFromHeaderSources(request.headers, middlewareHeaders);
-      const shouldBufferResponse = true;
       const isCrawlerRequest = __isPagesHtmlBotUserAgent(request.headers.get("user-agent") || "");
+      const shouldBufferResponse = isCrawlerRequest;
       // Build font Link header early so it's available for ISR cached responses too.
       // Font preloads are module-level state populated at import time and persist across requests.
       var _fontLinkHeader = "";

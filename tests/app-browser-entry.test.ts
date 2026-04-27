@@ -61,13 +61,11 @@ function createState(overrides: Partial<AppRouterState> = {}): AppRouterState {
 }
 
 describe("app browser entry state helpers", () => {
-  it("fetches client navigation RSC payloads through the visible URL with RSC headers", () => {
-    // Ported from Next.js: test/e2e/next-form/default/next-form-prefetch.test.ts
-    // The deploy harness intercepts `/search?...` RSC requests, not vinext's internal `.rsc` cache key.
+  it("fetches client navigation RSC payloads with RSC headers", () => {
     expect(APP_BROWSER_ENTRY_SOURCE).toContain(
       'const headers = new Headers({ Accept: "text/x-component", RSC: "1" });',
     );
-    expect(APP_BROWSER_ENTRY_SOURCE).toContain("const rscFetchUrl = url.pathname + url.search;");
+    expect(APP_BROWSER_ENTRY_SOURCE).toContain("const rscFetchUrl = rscUrl;");
     expect(APP_BROWSER_ENTRY_SOURCE).toContain("navResponse = await fetch(rscFetchUrl, {");
     expect(APP_BROWSER_ENTRY_SOURCE).toContain('"X-Vinext-Loading-Payload": "1"');
   });

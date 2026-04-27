@@ -1736,9 +1736,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     ...incomingExclude,
                     "vinext",
                     "@vercel/og",
-                    "react",
-                    "react/jsx-runtime",
-                    "react/jsx-dev-runtime",
+                    ...(hasCloudflarePlugin || hasNitroPlugin
+                      ? []
+                      : ["react", "react/jsx-runtime", "react/jsx-dev-runtime"]),
                   ]),
                 ],
                 entries: optimizeEntries,
@@ -2073,28 +2073,6 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           }
 
           return this.resolve(id, importer, { skipSelf: true });
-        }
-
-        // App Router RSC bundles must consistently use React's react-server
-        // export, including transitive JSX runtime imports from route handlers
-        // and server-only dependencies such as next/og.
-        if (this.environment?.name === "rsc") {
-          const parsedBareImport = parseBarePackageSpecifier(cleanId);
-          if (
-            parsedBareImport &&
-            (parsedBareImport.packageName === "react" ||
-              parsedBareImport.packageName === "react-dom")
-          ) {
-            const reactServerExport = resolveConditionalPackageExport(root, cleanId, [
-              "react-server",
-              "import",
-              "module",
-              "default",
-            ]);
-            if (reactServerExport) {
-              return reactServerExport;
-            }
-          }
         }
 
         if (importer) {

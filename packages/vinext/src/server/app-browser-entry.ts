@@ -111,6 +111,8 @@ const MAX_VISITED_RESPONSE_CACHE_SIZE = 50;
 const VISITED_RESPONSE_CACHE_TTL = 5 * 60_000;
 const MAX_TRAVERSAL_CACHE_TTL = 30 * 60_000;
 const loadingPayloadCache = new Map<string, CachedRscResponse>();
+const VINEXT_APP_ROUTER_STATE_HISTORY_STATE_KEY = "__vinext_appRouterStateKey";
+const MAX_HISTORY_ROUTER_STATE_SNAPSHOTS = 100;
 
 // These are plain module-level variables, unlike ClientNavigationState in
 // navigation.ts which uses Symbol.for to survive multiple Vite module instances.
@@ -144,6 +146,8 @@ let browserRouterStateRef: { current: AppRouterState } | null = null;
 let activePendingBrowserRouterState: PendingBrowserRouterState | null = null;
 let latestClientParams: Record<string, string | string[]> = {};
 const visitedResponseCache = new Map<string, VisitedResponseCacheEntry>();
+const historyRouterStateSnapshots = new Map<string, AppRouterState>();
+let nextHistoryRouterStateSnapshotId = 0;
 
 function isServerActionResult(value: unknown): value is ServerActionResult {
   return !!value && typeof value === "object" && "root" in value;
@@ -244,6 +248,62 @@ function clearPrefetchState(): void {
 function clearClientNavigationCaches(): void {
   clearVisitedResponseCache();
   clearPrefetchState();
+}
+
+function evictHistoryRouterStateSnapshotsIfNeeded(): void {
+  while (historyRouterStateSnapshots.size >= MAX_HISTORY_ROUTER_STATE_SNAPSHOTS) {
+    const oldest = historyRouterStateSnapshots.keys().next().value;
+    if (oldest === undefined) {
+      return;
+    }
+    historyRouterStateSnapshots.delete(oldest);
+  }
+}
+
+function cloneHistoryStateRecord(state: unknown): Record<string, unknown> {
+  if (!state || typeof state !== "object") {
+    return {};
+  }
+
+  const nextState: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(state)) {
+    nextState[key] = value;
+  }
+  return nextState;
+}
+
+function storeHistoryRouterStateSnapshot(state: AppRouterState): string {
+  evictHistoryRouterStateSnapshotsIfNeeded();
+  const key = String(++nextHistoryRouterStateSnapshotId);
+  historyRouterStateSnapshots.set(key, state);
+  return key;
+}
+
+function persistHistoryRouterStateSnapshot(state: AppRouterState): void {
+  const key = storeHistoryRouterStateSnapshot(state);
+  const historyState = cloneHistoryStateRecord(
+    createHistoryStateWithPreviousNextUrl(window.history.state, state.previousNextUrl),
+  );
+  historyState[VINEXT_APP_ROUTER_STATE_HISTORY_STATE_KEY] = key;
+  replaceHistoryStateWithoutNotify(historyState, "", window.location.href);
+}
+
+function readHistoryRouterStateSnapshot(state: unknown): AppRouterState | null {
+  const key = cloneHistoryStateRecord(state)[VINEXT_APP_ROUTER_STATE_HISTORY_STATE_KEY];
+  if (typeof key !== "string") {
+    return null;
+  }
+  return historyRouterStateSnapshots.get(key) ?? null;
+}
+
+function restoreHistoryRouterStateSnapshot(state: AppRouterState): void {
+  const navId = ++activeNavigationId;
+  settlePendingBrowserRouterState(activePendingBrowserRouterState);
+  setPendingPathname(window.location.pathname, navId);
+  applyClientParams(state.navigationSnapshot.params);
+  commitClientNavigationState(navId);
+  getBrowserRouterStateSetter()(state);
+  window.__VINEXT_RSC_PENDING__ = null;
 }
 
 function queuePrePaintNavigationEffect(renderId: number, effect: (() => void) | null): void {
@@ -608,15 +668,6 @@ function BrowserRoot({
   useLayoutEffect(() => {
     setBrowserRouterState = setTreeStateValue;
     browserRouterStateRef = stateRef;
-    return () => {
-      if (setBrowserRouterState === setTreeStateValue) {
-        setBrowserRouterState = null;
-      }
-      if (browserRouterStateRef === stateRef) {
-        browserRouterStateRef = null;
-      }
-      setMountedSlotsHeader(null);
-    };
   }, [setTreeStateValue]);
 
   useLayoutEffect(() => {
@@ -624,16 +675,8 @@ function BrowserRoot({
   }, [treeState.elements]);
 
   useLayoutEffect(() => {
-    if (treeState.renderId !== 0) {
-      return;
-    }
-
-    replaceHistoryStateWithoutNotify(
-      createHistoryStateWithPreviousNextUrl(window.history.state, treeState.previousNextUrl),
-      "",
-      window.location.href,
-    );
-  }, [treeState.previousNextUrl, treeState.renderId]);
+    persistHistoryRouterStateSnapshot(treeState);
+  }, [treeState]);
 
   const committedTree = createElement(
     NavigationCommitSignal,
@@ -1168,7 +1211,7 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
 
         const url = new URL(currentHref, window.location.origin);
         const rscUrl = toRscUrl(url.pathname + url.search);
-        const rscFetchUrl = url.pathname + url.search;
+        const rscFetchUrl = rscUrl;
         let renderedLoadingPayload = false;
         const requestState = getRequestState(navigationKind, currentPrevNextUrl);
         const requestInterceptionContext = requestState.interceptionContext;
@@ -1547,6 +1590,14 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
   // microtask-based deferral for compatibility with non-RSC navigation.
   // See: https://github.com/vercel/next.js/discussions/41934#discussioncomment-4602607
   window.addEventListener("popstate", (event) => {
+    const snapshot = readHistoryRouterStateSnapshot(event.state);
+    if (snapshot) {
+      notifyAppRouterTransitionStart(window.location.href, "traverse");
+      restoreHistoryRouterStateSnapshot(snapshot);
+      restorePopstateScrollPosition(event.state);
+      return;
+    }
+
     notifyAppRouterTransitionStart(window.location.href, "traverse");
     const pendingNavigation =
       window.__VINEXT_RSC_NAVIGATE__?.(window.location.href, 0, "traverse") ?? Promise.resolve();

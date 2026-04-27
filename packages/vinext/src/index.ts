@@ -1712,7 +1712,16 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 ? {}
                 : {
                     resolve: {
-                      external: userSsrExternal === true ? true : [...userSsrExternal],
+                      external:
+                        userSsrExternal === true
+                          ? true
+                          : [
+                              "react",
+                              "react-dom",
+                              "react-dom/server",
+                              "react-dom/server.edge",
+                              ...userSsrExternal,
+                            ],
                       // Force all node_modules through Vite's transform pipeline
                       // so non-JS imports (CSS, images) don't hit Node's native
                       // ESM loader. Matches Next.js behavior of bundling everything.
@@ -1722,7 +1731,16 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     },
                   }),
               optimizeDeps: {
-                exclude: [...new Set([...incomingExclude, "vinext", "@vercel/og"])],
+                exclude: [
+                  ...new Set([
+                    ...incomingExclude,
+                    "vinext",
+                    "@vercel/og",
+                    "react",
+                    "react/jsx-runtime",
+                    "react/jsx-dev-runtime",
+                  ]),
+                ],
                 entries: optimizeEntries,
               },
               build: {

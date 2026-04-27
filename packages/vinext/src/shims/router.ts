@@ -1906,6 +1906,10 @@ if (typeof window !== "undefined") {
   });
 
   window.addEventListener("popstate", (e: PopStateEvent) => {
+    if (typeof window.__VINEXT_RSC_NAVIGATE__ === "function") {
+      return;
+    }
+
     const state = e.state as NextHistoryState | null;
 
     if (state?.__NA) {

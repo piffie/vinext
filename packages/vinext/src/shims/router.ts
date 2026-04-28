@@ -1796,6 +1796,7 @@ let _beforePopStateCb: BeforePopStateCallback | undefined;
 // compare the previous value with the (already-changed) window.location.
 let _lastPathnameAndSearch =
   typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
+let _lastIgnoredStalePopstate: string | null = null;
 
 type NextHistoryState = {
   url?: string;
@@ -1844,6 +1845,17 @@ function stripLocaleFromAppPathAndSearch(pathAndSearch: string): string {
 
 function getCurrentAppUrl(): string {
   return stripBasePath(window.location.pathname, __basePath) + window.location.search;
+}
+
+function getPathnameAndSearch(href: string): string {
+  const url = new URL(href, window.location.href);
+  return url.pathname + url.search;
+}
+
+function getCurrentLocaleStrippedPathAndSearch(): string {
+  const asPath = getLocaleStrippedCurrentAsPath();
+  const hashIndex = asPath.indexOf("#");
+  return hashIndex === -1 ? asPath : asPath.slice(0, hashIndex);
 }
 
 function ensureInitialPagesHistoryState(): void {
@@ -1942,7 +1954,31 @@ if (typeof window !== "undefined" && window.history) {
 
       const fullStateUrl = toBrowserNavigationHref(stateUrl, window.location.href, __basePath);
       const browserPathAndSearch = window.location.pathname + window.location.search;
-      if (browserPathAndSearch === _lastPathnameAndSearch) {
+      const stateBrowserPathAndSearch = getPathnameAndSearch(fullStateUrl);
+      const stateAsPathAndSearch = getPathnameAndSearch(stateAs);
+      const currentAsPathAndSearch = getCurrentLocaleStrippedPathAndSearch();
+      const localeMatchesCurrent =
+        stateOptions.locale === undefined || stateOptions.locale === window.__VINEXT_LOCALE__;
+      const staleSameVisibleRoute =
+        localeMatchesCurrent &&
+        stateAsPathAndSearch === currentAsPathAndSearch &&
+        stateBrowserPathAndSearch !== currentAsPathAndSearch;
+
+      if (staleSameVisibleRoute) {
+        const staleKey = `${stateOptions.locale ?? ""}:${stateBrowserPathAndSearch}:${stateAsPathAndSearch}`;
+        if (_lastIgnoredStalePopstate !== staleKey) {
+          _lastIgnoredStalePopstate = staleKey;
+          restoreScrollPosition(e.state, forcedScroll);
+          return;
+        }
+      } else {
+        _lastIgnoredStalePopstate = null;
+      }
+
+      if (
+        browserPathAndSearch === _lastPathnameAndSearch &&
+        stateBrowserPathAndSearch === browserPathAndSearch
+      ) {
         const hashUrl = stripBasePath(browserPathAndSearch, __basePath) + window.location.hash;
         routerEvents.emit("hashChangeStart", hashUrl, { shallow: false });
         scrollToHash(window.location.hash);
@@ -1951,6 +1987,7 @@ if (typeof window !== "undefined" && window.history) {
         dispatchVinextNavigate();
         return;
       }
+      _lastIgnoredStalePopstate = null;
       _lastPathnameAndSearch = browserPathAndSearch;
       routerEvents.emit("routeChangeStart", stateAs, { shallow: stateOptions.shallow ?? false });
       routerEvents.emit("beforeHistoryChange", stateAs, {

@@ -143,6 +143,50 @@ describe("pages page response", () => {
     expect(common.renderDocumentToString).toHaveBeenCalledTimes(1);
   });
 
+  it("runs the Pages head prepass before streamed responses build the shell", async () => {
+    // Ported from Next.js: test/e2e/next-head/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/next-head/index.test.ts
+    const common = createCommonOptions();
+    let headHtml = "";
+
+    const response = await renderPagesPageResponse({
+      ...common.options,
+      getSSRHeadHTML: vi.fn(() => headHtml),
+      renderHeadPrepassToStringAsync: vi.fn(async () => {
+        headHtml = '<meta name="test-head-1" content="hello" data-next-head="" />';
+        return "";
+      }),
+      shouldBufferResponse: false,
+    });
+
+    const html = await response.text();
+    const headIndex = html.indexOf('<meta name="test-head-1" content="hello" data-next-head=""');
+    const assetIndex = html.indexOf('<script type="module" defer src="/entry.js"');
+
+    expect(headIndex).toBeGreaterThan(-1);
+    expect(assetIndex).toBeGreaterThan(headIndex);
+  });
+
+  it("normalizes inline styled-jsx CSS in streamed Pages HTML", async () => {
+    // Ported from Next.js: test/e2e/streaming-ssr/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/streaming-ssr/index.test.ts
+    const common = createCommonOptions();
+
+    const response = await renderPagesPageResponse({
+      ...common.options,
+      renderToReadableStream: vi.fn(async () =>
+        createStream([
+          "<div><style>\n  p {",
+          "\n    color: blue;",
+          "\n  }\n</style><p>index</p></div>",
+        ]),
+      ),
+      shouldBufferResponse: false,
+    });
+
+    await expect(response.text()).resolves.toContain("<style>p{color:blue;}</style>");
+  });
+
   it("preserves array-valued non-set-cookie headers from gSSP responses", async () => {
     const common = createCommonOptions();
 

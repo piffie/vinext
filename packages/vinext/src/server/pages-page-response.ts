@@ -366,10 +366,19 @@ async function buildPagesCompositeStream(
   shellSuffix: string,
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const styleNormalizer = createPagesInlineStyleStreamNormalizer();
 
   return new ReadableStream({
     async start(controller) {
-      controller.enqueue(encoder.encode(shellPrefix));
+      const enqueueText = (text: string, flush = false) => {
+        const normalized = styleNormalizer(text, flush);
+        if (normalized) {
+          controller.enqueue(encoder.encode(normalized));
+        }
+      };
+
+      enqueueText(shellPrefix);
       const reader = bodyStream.getReader();
       try {
         for (;;) {
@@ -377,12 +386,13 @@ async function buildPagesCompositeStream(
           if (chunk.done) {
             break;
           }
-          controller.enqueue(chunk.value);
+          enqueueText(decoder.decode(chunk.value, { stream: true }));
         }
       } finally {
         reader.releaseLock();
       }
-      controller.enqueue(encoder.encode(shellSuffix));
+      enqueueText(decoder.decode());
+      enqueueText(shellSuffix, true);
       controller.close();
     },
   });
@@ -436,13 +446,63 @@ export function normalizePagesInlineStyleTags(html: string): string {
 
   const prefix = html.slice(0, bodyIndex);
   const body = html.slice(bodyIndex);
-  return (
-    prefix +
-    body.replace(/<style(\s[^>]*)?>([\s\S]*?)<\/style>/gi, (match, attrs = "", css) => {
-      if (!css.includes(":") && !css.includes("{")) return match;
-      return `<style${attrs}>${minifyStyledJsxCss(css)}</style>`;
-    })
-  );
+  return prefix + normalizeInlineStyleTagsFragment(body);
+}
+
+function normalizeInlineStyleTagsFragment(html: string): string {
+  return html.replace(/<style(\s[^>]*)?>([\s\S]*?)<\/style>/gi, (match, attrs = "", css) => {
+    if (!css.includes(":") && !css.includes("{")) return match;
+    return `<style${attrs}>${minifyStyledJsxCss(css)}</style>`;
+  });
+}
+
+function createPagesInlineStyleStreamNormalizer(): (text: string, flush?: boolean) => string {
+  let sawBody = false;
+  let pending = "";
+
+  return (text, flush = false) => {
+    pending += text;
+    let output = "";
+
+    if (!sawBody) {
+      const bodyMatch = /<body\b[^>]*>/i.exec(pending);
+      if (!bodyMatch) {
+        if (flush) {
+          output = pending;
+          pending = "";
+        } else if (pending.length > 4096) {
+          output = pending.slice(0, -512);
+          pending = pending.slice(-512);
+        }
+        return output;
+      }
+
+      const bodyEnd = bodyMatch.index + bodyMatch[0].length;
+      output += pending.slice(0, bodyEnd);
+      pending = pending.slice(bodyEnd);
+      sawBody = true;
+    }
+
+    const lastStyleClose = pending.toLowerCase().lastIndexOf("</style>");
+    if (lastStyleClose === -1) {
+      if (flush) {
+        output += pending;
+        pending = "";
+      }
+      return output;
+    }
+
+    const completeStyleEnd = lastStyleClose + "</style>".length;
+    output += normalizeInlineStyleTagsFragment(pending.slice(0, completeStyleEnd));
+    pending = pending.slice(completeStyleEnd);
+
+    if (flush) {
+      output += pending;
+      pending = "";
+    }
+
+    return output;
+  };
 }
 
 export async function renderPagesPageResponse(
@@ -460,7 +520,7 @@ export async function renderPagesPageResponse(
   const pageElement = createPageElement();
 
   options.resetSSRHead?.();
-  if (options.renderHeadPrepassToStringAsync && options.shouldBufferResponse) {
+  if (options.renderHeadPrepassToStringAsync) {
     await runWithFreshPagesRenderState(() =>
       options.renderHeadPrepassToStringAsync!(createPageElement()),
     );

@@ -13,6 +13,12 @@ function isAppDirSuite(suite) {
   return suite.startsWith("test/e2e/app-dir/");
 }
 
+const APP_ROUTER_NON_APP_DIR_SUITES = [
+  // This suite lives outside test/e2e/app-dir, but it explicitly exercises App
+  // Router RSC form prefetching and should not gate this Pages Router PR.
+  "test/e2e/next-form/default/next-form-prefetch.test.ts",
+];
+
 async function main() {
   const nextjsDirArg = process.argv[2];
   const outputPathArg = process.argv[3];
@@ -35,7 +41,13 @@ async function main() {
   const suites = Object.fromEntries(
     Object.entries(source.suites ?? {}).filter(([suite]) => !isAppDirSuite(suite)),
   );
-  const exclude = Array.from(new Set([...(source.rules?.exclude ?? []), "test/e2e/app-dir/**/*"]));
+  const exclude = Array.from(
+    new Set([
+      ...(source.rules?.exclude ?? []),
+      "test/e2e/app-dir/**/*",
+      ...APP_ROUTER_NON_APP_DIR_SUITES,
+    ]),
+  );
   const manifest = {
     version: 2,
     suites,

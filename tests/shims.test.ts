@@ -9867,6 +9867,111 @@ describe("Pages Router concurrent navigation", () => {
     }
   });
 
+  it("ignores the first stale same-locale Pages history state, then navigates", async () => {
+    // Ported from Next.js: test/e2e/ignore-invalid-popstateevent/without-i18n.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/ignore-invalid-popstateevent/without-i18n.test.ts
+    const previousWindow = (globalThis as any).window;
+    const originalFetch = globalThis.fetch;
+    const listeners = new Map<string, (event: any) => void>();
+    const { win } = createNavWindow();
+    win.location.pathname = "/static";
+    win.location.href = "http://localhost/static";
+    win.addEventListener = vi.fn((type: string, handler: (event: any) => void) => {
+      listeners.set(type, handler);
+    });
+    (globalThis as any).window = win;
+
+    const fetchUrls: string[] = [];
+    globalThis.fetch = async (url: any) => {
+      fetchUrls.push(String(url));
+      return new Response("boom", { status: 500 });
+    };
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+
+      const popstateHandler = listeners.get("popstate");
+      expect(popstateHandler).toBeDefined();
+
+      const staleState = {
+        url: "/[dynamic]?",
+        as: "/static",
+        options: {},
+        __N: true,
+        key: "",
+      };
+
+      popstateHandler!({ state: staleState });
+      await Promise.resolve();
+      expect(fetchUrls).toHaveLength(0);
+
+      popstateHandler!({ state: staleState });
+      await Promise.resolve();
+      expect(fetchUrls).toHaveLength(1);
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not ignore stale Pages history state for a different locale", async () => {
+    // Ported from Next.js: test/e2e/ignore-invalid-popstateevent/with-i18n.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/ignore-invalid-popstateevent/with-i18n.test.ts
+    const previousWindow = (globalThis as any).window;
+    const originalFetch = globalThis.fetch;
+    const listeners = new Map<string, (event: any) => void>();
+    const { win } = createNavWindow();
+    win.location.pathname = "/sv/static";
+    win.location.href = "http://localhost/sv/static";
+    (win as any).__VINEXT_LOCALE__ = "sv";
+    (win as any).__VINEXT_LOCALES__ = ["en", "sv"];
+    win.addEventListener = vi.fn((type: string, handler: (event: any) => void) => {
+      listeners.set(type, handler);
+    });
+    (globalThis as any).window = win;
+
+    const fetchUrls: string[] = [];
+    globalThis.fetch = async (url: any) => {
+      fetchUrls.push(String(url));
+      return new Response("boom", { status: 500 });
+    };
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+
+      const popstateHandler = listeners.get("popstate");
+      expect(popstateHandler).toBeDefined();
+
+      popstateHandler!({
+        state: {
+          url: "/[dynamic]?",
+          as: "/static",
+          options: { locale: "en" },
+          __N: true,
+          key: "",
+        },
+      });
+      await Promise.resolve();
+
+      expect(fetchUrls).toHaveLength(1);
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("replace() also cancels superseded navigation", async () => {
     const previousWindow = (globalThis as any).window;
     const originalFetch = globalThis.fetch;

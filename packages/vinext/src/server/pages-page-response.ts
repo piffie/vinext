@@ -378,7 +378,7 @@ async function buildPagesCompositeStream(
         }
       };
 
-      enqueueText(shellPrefix);
+      let pendingPrefix = shellPrefix;
       const reader = bodyStream.getReader();
       try {
         for (;;) {
@@ -386,12 +386,13 @@ async function buildPagesCompositeStream(
           if (chunk.done) {
             break;
           }
-          enqueueText(decoder.decode(chunk.value, { stream: true }));
+          enqueueText(pendingPrefix + decoder.decode(chunk.value, { stream: true }));
+          pendingPrefix = "";
         }
       } finally {
         reader.releaseLock();
       }
-      enqueueText(decoder.decode());
+      enqueueText(pendingPrefix + decoder.decode());
       enqueueText(shellSuffix, true);
       controller.close();
     },
@@ -483,22 +484,46 @@ function createPagesInlineStyleStreamNormalizer(): (text: string, flush?: boolea
       sawBody = true;
     }
 
-    const lastStyleClose = pending.toLowerCase().lastIndexOf("</style>");
-    if (lastStyleClose === -1) {
-      if (flush) {
-        output += pending;
-        pending = "";
+    for (;;) {
+      const lowerPending = pending.toLowerCase();
+      const styleStart = lowerPending.indexOf("<style");
+      if (styleStart === -1) {
+        if (flush) {
+          output += pending;
+          pending = "";
+          break;
+        }
+
+        // Keep a tiny tail so a split "<style" start tag can be recognized
+        // when the next streamed chunk arrives, but do not hold ordinary body
+        // HTML and delay Suspense fallbacks.
+        const tailLength = Math.min(pending.length, "<style".length - 1);
+        const emitLength = pending.length - tailLength;
+        if (emitLength > 0) {
+          output += pending.slice(0, emitLength);
+          pending = pending.slice(emitLength);
+        }
+        break;
       }
-      return output;
-    }
 
-    const completeStyleEnd = lastStyleClose + "</style>".length;
-    output += normalizeInlineStyleTagsFragment(pending.slice(0, completeStyleEnd));
-    pending = pending.slice(completeStyleEnd);
+      if (styleStart > 0) {
+        output += pending.slice(0, styleStart);
+        pending = pending.slice(styleStart);
+        continue;
+      }
 
-    if (flush) {
-      output += pending;
-      pending = "";
+      const styleEnd = lowerPending.indexOf("</style>");
+      if (styleEnd === -1) {
+        if (flush) {
+          output += pending;
+          pending = "";
+        }
+        break;
+      }
+
+      const completeStyleEnd = styleEnd + "</style>".length;
+      output += normalizeInlineStyleTagsFragment(pending.slice(0, completeStyleEnd));
+      pending = pending.slice(completeStyleEnd);
     }
 
     return output;

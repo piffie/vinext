@@ -187,6 +187,39 @@ describe("pages page response", () => {
     await expect(response.text()).resolves.toContain("<style>p{color:blue;}</style>");
   });
 
+  it("does not buffer streamed body content while waiting for later style tags", async () => {
+    const common = createCommonOptions();
+
+    const response = await renderPagesPageResponse({
+      ...common.options,
+      renderToReadableStream: vi.fn(async () =>
+        createStream([
+          "<main>Loading delayed chunk...</main><style>",
+          "\n  p { color: blue; }\n</style><p>done</p>",
+        ]),
+      ),
+      shouldBufferResponse: false,
+    });
+
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const decoder = new TextDecoder();
+    const firstChunk = await reader!.read();
+
+    expect(firstChunk.done).toBe(false);
+    expect(decoder.decode(firstChunk.value)).toContain("Loading delayed chunk...");
+
+    let html = "";
+    for (;;) {
+      const chunk = await reader!.read();
+      if (chunk.done) break;
+      html += decoder.decode(chunk.value, { stream: true });
+    }
+    html += decoder.decode();
+
+    expect(html).toContain("<style>p{color:blue;}</style>");
+  });
+
   it("preserves array-valued non-set-cookie headers from gSSP responses", async () => {
     const common = createCommonOptions();
 

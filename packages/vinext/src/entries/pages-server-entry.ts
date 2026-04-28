@@ -391,6 +391,20 @@ async function renderToStringAsync(element) {
   return new Response(stream).text();
 }
 
+async function renderHeadPrepassAsync(element) {
+  const stream = await renderToReadableStream(element, {
+    onError() {
+      // The prepass is intentionally aborted after synchronous next/head tags render.
+    },
+  });
+  try {
+    await stream.cancel();
+  } catch (_error) {
+    // The prepass only exists to collect synchronously rendered next/head tags.
+  }
+  return "";
+}
+
 async function renderIsrPassToStringAsync(element) {
   // The cache-fill render is a second render pass for the same request.
   // Reset render-scoped state so it cannot leak from the streamed response
@@ -836,7 +850,7 @@ async function renderStatusPage(options) {
       return renderToStringAsync(element);
     },
     renderHeadPrepassToStringAsync(element) {
-      return renderToStringAsync(element);
+      return renderHeadPrepassAsync(element);
     },
     renderIsrPassToStringAsync,
     renderToReadableStream(element) {
@@ -1296,7 +1310,7 @@ async function _renderPage(request, url, manifest, middlewareHeaders, isDataRequ
           return renderToStringAsync(element);
         },
         renderHeadPrepassToStringAsync(element) {
-          return renderToStringAsync(element);
+          return renderHeadPrepassAsync(element);
         },
         renderIsrPassToStringAsync,
         renderToReadableStream(element) {

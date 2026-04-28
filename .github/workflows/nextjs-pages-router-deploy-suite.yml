@@ -10,7 +10,7 @@ on:
       next-ref:
         description: Next.js ref to test against
         required: true
-        default: canary
+        default: v16.2.4
       test-concurrency:
         description: Per-shard Next.js test concurrency
         required: true
@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nextjs-pages-router-deploy-suite-${{ github.ref }}-${{ inputs.next-ref || 'canary' }}
+  group: nextjs-pages-router-deploy-suite-${{ github.ref }}-${{ inputs.next-ref || 'v16.2.4' }}
   cancel-in-progress: false
 
 jobs:
@@ -44,23 +44,11 @@ jobs:
       - name: Enable pnpm shim for Next.js scripts
         run: corepack enable pnpm
 
-      - name: Resolve Next.js ref
-        id: next-ref
-        run: |
-          set -euo pipefail
-          if [ "$NEXT_REF" = "canary" ]; then
-            echo "ref=v$(npm view next@canary version)" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=$NEXT_REF" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          NEXT_REF: ${{ inputs.next-ref || 'canary' }}
-
       - name: Checkout Next.js
         uses: actions/checkout@v6
         with:
           repository: vercel/next.js
-          ref: ${{ steps.next-ref.outputs.ref }}
+          ref: ${{ inputs.next-ref || 'v16.2.4' }}
           path: next.js
 
       - name: Locate pnpm store

@@ -8632,6 +8632,56 @@ describe("next/compat/router shim", () => {
       }
     }
   });
+
+  it("uses serialized Pages query for the initial client router snapshot", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+
+    const previousWindow = (globalThis as any).window;
+    (globalThis as any).window = {
+      location: {
+        pathname: "/",
+        search: "?query=true",
+        hash: "",
+        href: "http://localhost/?query=true",
+      },
+      history: {
+        state: null,
+        replaceState() {},
+      },
+      addEventListener() {},
+      __NEXT_DATA__: {
+        page: "/",
+        query: {},
+        isFallback: false,
+      },
+      __VINEXT_LOCALE__: undefined,
+      __VINEXT_LOCALES__: undefined,
+      __VINEXT_DEFAULT_LOCALE__: undefined,
+    };
+
+    try {
+      vi.resetModules();
+      const { useRouter: usePagesRouter } = await import("../packages/vinext/src/shims/router.js");
+      let captured: unknown = "NOT_SET";
+      function Probe() {
+        captured = usePagesRouter();
+        return React.createElement("div", null, "probe");
+      }
+
+      renderToStaticMarkup(React.createElement(Probe));
+
+      expect((captured as any).query).toEqual({});
+      expect((captured as any).asPath).toBe("/?query=true");
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
 });
 
 describe("Pages Router router helpers", () => {
@@ -9959,6 +10009,79 @@ describe("Pages Router concurrent navigation", () => {
           options: {},
           __N: true,
           key: "",
+        },
+      });
+      await Promise.resolve();
+
+      expect(fetchUrls).toHaveLength(1);
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      if (previousBasePath === undefined) {
+        delete process.env.__NEXT_ROUTER_BASEPATH;
+      } else {
+        process.env.__NEXT_ROUTER_BASEPATH = previousBasePath;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not ignore aliased Pages history entries after the first popstate", async () => {
+    // Ported from Next.js: test/e2e/basepath/trailing-slash.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/basepath/trailing-slash.test.ts
+    const previousWindow = (globalThis as any).window;
+    const previousBasePath = process.env.__NEXT_ROUTER_BASEPATH;
+    const originalFetch = globalThis.fetch;
+    const listeners = new Map<string, (event: any) => void>();
+    const { win } = createNavWindow();
+    win.location.pathname = "/docs/hello/";
+    win.location.href = "http://localhost/docs/hello/";
+    win.addEventListener = vi.fn((type: string, handler: (event: any) => void) => {
+      listeners.set(type, handler);
+    });
+    process.env.__NEXT_ROUTER_BASEPATH = "/docs";
+    (globalThis as any).window = win;
+
+    const fetchUrls: string[] = [];
+    globalThis.fetch = async (url: any) => {
+      fetchUrls.push(String(url));
+      return new Response("boom", { status: 500 });
+    };
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+
+      const popstateHandler = listeners.get("popstate");
+      expect(popstateHandler).toBeDefined();
+
+      win.location.pathname = "/docs/";
+      win.location.href = "http://localhost/docs/";
+      popstateHandler!({
+        state: {
+          url: "/",
+          as: "/",
+          options: {},
+          __N: true,
+          key: "index",
+        },
+      });
+      await Promise.resolve();
+      fetchUrls.length = 0;
+
+      win.location.pathname = "/docs/hello/";
+      win.location.href = "http://localhost/docs/hello/";
+      popstateHandler!({
+        state: {
+          url: "/something-else/",
+          as: "/hello/",
+          options: {},
+          __N: true,
+          key: "alias",
         },
       });
       await Promise.resolve();

@@ -683,6 +683,22 @@ function getPathnameAndQuery(): {
   query: Record<string, string | string[]>;
   asPath: string;
 } {
+  return getPathnameAndQueryFromLocation({ includeSearchParams: true });
+}
+
+function getHydrationPathnameAndQuery(): {
+  pathname: string;
+  query: Record<string, string | string[]>;
+  asPath: string;
+} {
+  return getPathnameAndQueryFromLocation({ includeSearchParams: false });
+}
+
+function getPathnameAndQueryFromLocation(options: { includeSearchParams: boolean }): {
+  pathname: string;
+  query: Record<string, string | string[]>;
+  asPath: string;
+} {
   if (typeof window === "undefined") {
     const _ssrCtx = _getSSRContext();
     if (_ssrCtx) {
@@ -717,11 +733,15 @@ function getPathnameAndQuery(): {
       }
     }
   }
-  // URL search params always reflect the current URL
+  // URL search params always reflect the current URL after hydration. During
+  // the first client render, prefer serialized __NEXT_DATA__.query so static
+  // Pages Router apps hydrate against the same query object the server used.
   const searchQuery: Record<string, string | string[]> = {};
-  const params = new URLSearchParams(browserUrl.search);
-  for (const [key, value] of params) {
-    addQueryParam(searchQuery, key, value);
+  if (options.includeSearchParams) {
+    const params = new URLSearchParams(browserUrl.search);
+    for (const [key, value] of params) {
+      addQueryParam(searchQuery, key, value);
+    }
   }
   const query = { ...nextDataQuery, ...searchQuery };
   const dynamicPathParams = extractDynamicParamsFromPath(pathname, resolvedPath);
@@ -1487,9 +1507,13 @@ function buildRouterValue(
 /**
  * useRouter hook - Pages Router compatible.
  */
+let _hasHydratedPagesRouter = false;
+
 export function useRouter(): NextRouter {
   const contextRouter = useContext(RouterContext);
-  const [{ pathname, query, asPath }, setState] = useState(getPathnameAndQuery);
+  const [{ pathname, query, asPath }, setState] = useState(() =>
+    _hasHydratedPagesRouter ? getPathnameAndQuery() : getHydrationPathnameAndQuery(),
+  );
 
   // Popstate is handled by the module-level listener below so beforePopState()
   // is consistently enforced even when multiple components mount useRouter().
@@ -1497,6 +1521,7 @@ export function useRouter(): NextRouter {
     // Hydration should start from the SSR snapshot, but Pages Router query
     // values derived from window.location.search become authoritative once the
     // client router is mounted.
+    _hasHydratedPagesRouter = true;
     setState(getPathnameAndQuery());
     const onNavigate = ((_e: CustomEvent) => {
       setState(getPathnameAndQuery());
@@ -1797,6 +1822,7 @@ let _beforePopStateCb: BeforePopStateCallback | undefined;
 let _lastPathnameAndSearch =
   typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
 let _lastIgnoredStalePopstate: string | null = null;
+let _isFirstPagesPopStateEvent = true;
 
 type NextHistoryState = {
   url?: string;
@@ -1928,6 +1954,9 @@ if (typeof window !== "undefined" && window.history) {
       return;
     }
 
+    const isFirstPopStateEvent = _isFirstPagesPopStateEvent;
+    _isFirstPagesPopStateEvent = false;
+
     const state = e.state as NextHistoryState | null;
 
     if (state?.__NA) {
@@ -1966,6 +1995,7 @@ if (typeof window !== "undefined" && window.history) {
       const localeMatchesCurrent =
         stateOptions.locale === undefined || stateOptions.locale === window.__VINEXT_LOCALE__;
       const staleSameVisibleRoute =
+        isFirstPopStateEvent &&
         localeMatchesCurrent &&
         stateAsPathAndSearch === currentAsPathAndSearch &&
         stateAppPathAndSearch !== currentAsPathAndSearch;

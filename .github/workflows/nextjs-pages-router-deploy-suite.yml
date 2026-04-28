@@ -41,6 +41,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Enable pnpm shim for Next.js scripts
+        run: corepack enable pnpm
+
       - name: Checkout Next.js
         uses: actions/checkout@v6
         with:

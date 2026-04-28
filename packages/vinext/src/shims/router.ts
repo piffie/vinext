@@ -1852,6 +1852,11 @@ function getPathnameAndSearch(href: string): string {
   return url.pathname + url.search;
 }
 
+function getAppPathnameAndSearch(href: string): string {
+  const url = new URL(href, window.location.href);
+  return stripBasePath(url.pathname, __basePath) + url.search;
+}
+
 function getCurrentLocaleStrippedPathAndSearch(): string {
   const asPath = getLocaleStrippedCurrentAsPath();
   const hashIndex = asPath.indexOf("#");
@@ -1955,6 +1960,7 @@ if (typeof window !== "undefined" && window.history) {
       const fullStateUrl = toBrowserNavigationHref(stateUrl, window.location.href, __basePath);
       const browserPathAndSearch = window.location.pathname + window.location.search;
       const stateBrowserPathAndSearch = getPathnameAndSearch(fullStateUrl);
+      const stateAppPathAndSearch = getAppPathnameAndSearch(fullStateUrl);
       const stateAsPathAndSearch = getPathnameAndSearch(stateAs);
       const currentAsPathAndSearch = getCurrentLocaleStrippedPathAndSearch();
       const localeMatchesCurrent =
@@ -1962,7 +1968,7 @@ if (typeof window !== "undefined" && window.history) {
       const staleSameVisibleRoute =
         localeMatchesCurrent &&
         stateAsPathAndSearch === currentAsPathAndSearch &&
-        stateBrowserPathAndSearch !== currentAsPathAndSearch;
+        stateAppPathAndSearch !== currentAsPathAndSearch;
 
       if (staleSameVisibleRoute) {
         const staleKey = `${stateOptions.locale ?? ""}:${stateBrowserPathAndSearch}:${stateAsPathAndSearch}`;

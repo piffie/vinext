@@ -9920,6 +9920,66 @@ describe("Pages Router concurrent navigation", () => {
     }
   });
 
+  it("does not treat basePath-stripped Pages history state as stale", async () => {
+    // Ported from Next.js: test/e2e/basepath/trailing-slash.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/basepath/trailing-slash.test.ts
+    const previousWindow = (globalThis as any).window;
+    const previousBasePath = process.env.__NEXT_ROUTER_BASEPATH;
+    const originalFetch = globalThis.fetch;
+    const listeners = new Map<string, (event: any) => void>();
+    const { win } = createNavWindow();
+    win.location.pathname = "/docs/hello/";
+    win.location.href = "http://localhost/docs/hello/";
+    win.addEventListener = vi.fn((type: string, handler: (event: any) => void) => {
+      listeners.set(type, handler);
+    });
+    process.env.__NEXT_ROUTER_BASEPATH = "/docs";
+    (globalThis as any).window = win;
+
+    const fetchUrls: string[] = [];
+    globalThis.fetch = async (url: any) => {
+      fetchUrls.push(String(url));
+      return new Response("boom", { status: 500 });
+    };
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+
+      const popstateHandler = listeners.get("popstate");
+      expect(popstateHandler).toBeDefined();
+
+      win.location.pathname = "/docs/";
+      win.location.href = "http://localhost/docs/";
+
+      popstateHandler!({
+        state: {
+          url: "/",
+          as: "/",
+          options: {},
+          __N: true,
+          key: "",
+        },
+      });
+      await Promise.resolve();
+
+      expect(fetchUrls).toHaveLength(1);
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      if (previousBasePath === undefined) {
+        delete process.env.__NEXT_ROUTER_BASEPATH;
+      } else {
+        process.env.__NEXT_ROUTER_BASEPATH = previousBasePath;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("does not ignore stale Pages history state for a different locale", async () => {
     // Ported from Next.js: test/e2e/ignore-invalid-popstateevent/with-i18n.test.ts
     // https://github.com/vercel/next.js/blob/canary/test/e2e/ignore-invalid-popstateevent/with-i18n.test.ts

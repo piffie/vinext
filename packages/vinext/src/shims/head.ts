@@ -292,6 +292,12 @@ function syncClientHead(): void {
     el.remove();
   });
 
+  const defaultHeadTags = Array.from(
+    document.head.querySelectorAll("meta[charset], meta[name='viewport']"),
+  );
+  const lastDefaultHeadTag = defaultHeadTags[defaultHeadTags.length - 1];
+  const insertionAnchor = lastDefaultHeadTag?.nextSibling ?? document.head.firstChild;
+
   for (const child of reduceHeadChildren([..._clientHeadChildren.values()])) {
     if (typeof child.type !== "string") continue;
 
@@ -314,8 +320,8 @@ function syncClientHead(): void {
       }
     }
 
-    domEl.setAttribute("data-vinext-head", "true");
-    document.head.appendChild(domEl);
+    domEl.setAttribute("data-next-head", "");
+    document.head.insertBefore(domEl, insertionAnchor);
   }
 }
 

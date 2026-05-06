@@ -22,7 +22,7 @@ import {
   setCurrentFetchCacheMode,
   setCurrentFetchSoftTags,
 } from "vinext/shims/fetch-cache";
-import type { AppOutgoingElements } from "./app-elements.js";
+import { AppElementsWire, type AppOutgoingElements } from "./app-elements.js";
 import { readAppPageCacheResponse } from "./app-page-cache.js";
 import { resolveAppPageParentHttpAccessBoundaryModule } from "./app-page-boundary.js";
 import { readStreamAsText } from "../utils/text-stream.js";
@@ -571,7 +571,9 @@ export async function dispatchAppPage<TRoute extends AppPageDispatchRoute>(
     classification: {
       getLayoutId(index) {
         const treePosition = route.layoutTreePositions?.[index] ?? 0;
-        return "layout:" + createAppPageTreePath([...route.routeSegments], treePosition);
+        return AppElementsWire.encodeLayoutId(
+          createAppPageTreePath([...route.routeSegments], treePosition),
+        );
       },
       buildTimeClassifications: route.__buildTimeClassifications,
       buildTimeReasons: route.__buildTimeReasons,

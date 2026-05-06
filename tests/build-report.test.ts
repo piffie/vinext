@@ -21,7 +21,7 @@ import {
   formatBuildReport,
   printBuildReport,
 } from "../packages/vinext/src/build/report.js";
-import { invalidateAppRouteCache } from "../packages/vinext/src/routing/app-router.js";
+import { appRouter, invalidateAppRouteCache } from "../packages/vinext/src/routing/app-router.js";
 import { invalidateRouteCache } from "../packages/vinext/src/routing/pages-router.js";
 
 const FIXTURES_PAGES = path.resolve("tests/fixtures/pages-basic/pages");
@@ -492,6 +492,21 @@ describe("buildReportRows", () => {
     const rows = buildReportRows({ pageRoutes });
     expect(rows[0].pattern).toBe("/aaa");
     expect(rows[1].pattern).toBe("/zzz");
+  });
+
+  it("classifies layout-only parallel-slot app routes from their render entry", async () => {
+    invalidateAppRouteCache();
+    const routes = await appRouter(FIXTURES_APP);
+    const rows = buildReportRows({ appRoutes: routes });
+
+    expect(rows.find((row) => row.pattern === "/parallel-nested/home")).toMatchObject({
+      pattern: "/parallel-nested/home",
+      type: "unknown",
+    });
+    expect(rows.find((row) => row.pattern === "/slot-collision")).toMatchObject({
+      pattern: "/slot-collision",
+      type: "unknown",
+    });
   });
 });
 

@@ -7,15 +7,17 @@ import {
 import type { ClientNavigationRenderSnapshot } from "vinext/shims/navigation";
 import {
   createPendingNavigationCommit,
-  resolveAndClassifyNavigationCommit,
-  resolvePendingNavigationCommitDisposition,
-  routerReducer,
-  type AppRouterAction,
   type AppRouterState,
   type OperationLane,
-  type PendingOperationRecord,
 } from "./app-browser-state.js";
-import type { AppElements, LayoutFlags } from "./app-elements.js";
+import {
+  applyApprovedVisibleCommit,
+  approveHmrVisibleCommit,
+  approvePendingNavigationCommit,
+  resolveAndClassifyNavigationCommit,
+  type ApprovedVisibleCommit,
+} from "./app-browser-visible-commit.js";
+import type { AppElements } from "./app-elements.js";
 
 export type HistoryUpdateMode = "push" | "replace";
 
@@ -236,12 +238,12 @@ export function createAppBrowserNavigationController(
 
   function resolvePendingBrowserRouterState(
     pending: PendingBrowserRouterState | null | undefined,
-    action: AppRouterAction,
+    commit: ApprovedVisibleCommit,
   ): void {
     if (!pending || pending.settled) return;
 
     pending.settled = true;
-    pending.resolve(routerReducer(getBrowserRouterState(), action));
+    pending.resolve(applyApprovedVisibleCommit(getBrowserRouterState(), commit));
 
     if (activePendingBrowserRouterState === pending) {
       activePendingBrowserRouterState = null;
@@ -322,20 +324,7 @@ export function createAppBrowserNavigationController(
     // initialized-setter error.
     if (!hasBrowserRouterState()) return;
 
-    dispatchBrowserTree(
-      pending.action.elements,
-      navigationSnapshot,
-      pending.action.renderId,
-      "replace",
-      pending.interceptionContext,
-      pending.action.layoutFlags,
-      pending.previousNextUrl,
-      pending.routeId,
-      pending.rootLayoutTreePath,
-      pending.action.operation,
-      null,
-      false,
-    );
+    dispatchApprovedVisibleCommit(approveHmrVisibleCommit(pending), null, false);
   }
 
   function NavigationCommitSignal(
@@ -366,44 +355,23 @@ export function createAppBrowserNavigationController(
     return children;
   }
 
-  function dispatchBrowserTree(
-    elements: AppElements,
-    navigationSnapshot: ClientNavigationRenderSnapshot,
-    renderId: number,
-    actionType: "navigate" | "replace" | "traverse",
-    interceptionContext: string | null,
-    layoutFlags: LayoutFlags,
-    previousNextUrl: string | null,
-    routeId: string,
-    rootLayoutTreePath: string | null,
-    operation: PendingOperationRecord,
+  function dispatchApprovedVisibleCommit(
+    commit: ApprovedVisibleCommit,
     pendingRouterState: PendingBrowserRouterState | null,
     useTransitionMode: boolean,
   ): void {
     const setter = getBrowserRouterStateSetter();
-    const action: AppRouterAction = {
-      elements,
-      interceptionContext,
-      layoutFlags,
-      navigationSnapshot,
-      operation,
-      previousNextUrl,
-      renderId,
-      rootLayoutTreePath,
-      routeId,
-      type: actionType,
-    };
 
     const applyAction = () => {
       if (pendingRouterState) {
         // The programmatic navigation is already running inside React.startTransition
         // (from router.push/replace/refresh), so resolving the deferred promise is
         // sufficient — no additional startTransition wrapper is needed below.
-        resolvePendingBrowserRouterState(pendingRouterState, action);
+        resolvePendingBrowserRouterState(pendingRouterState, commit);
         return;
       }
 
-      setter(routerReducer(getBrowserRouterState(), action));
+      setter(applyApprovedVisibleCommit(getBrowserRouterState(), commit));
     };
 
     if (useTransitionMode) {
@@ -447,25 +415,30 @@ export function createAppBrowserNavigationController(
         type: options.actionType,
       });
 
-      const disposition = resolvePendingNavigationCommitDisposition({
+      const approval = approvePendingNavigationCommit({
         activeNavigationId,
-        currentRootLayoutTreePath: currentState.rootLayoutTreePath,
-        nextRootLayoutTreePath: pending.rootLayoutTreePath,
+        currentState,
+        pending,
         startedNavigationId: options.navId,
       });
 
-      if (disposition === "skip") {
+      if (approval.decision.disposition === "no-commit") {
         settlePendingBrowserRouterState(options.pendingRouterState);
         pendingNavigationCommits.delete(renderId);
         resolveCommitted?.();
         return;
       }
 
-      if (disposition === "hard-navigate") {
+      if (approval.decision.disposition === "hard-navigate") {
         settlePendingBrowserRouterState(options.pendingRouterState);
         pendingNavigationCommits.delete(renderId);
         window.location.assign(options.targetHref);
         return;
+      }
+
+      const approvedCommit = approval.approvedCommit;
+      if (approvedCommit === null) {
+        throw new Error("[vinext] Commit decision did not approve a visible commit");
       }
 
       queuePrePaintNavigationEffect(
@@ -475,22 +448,13 @@ export function createAppBrowserNavigationController(
           historyUpdateMode: options.historyUpdateMode,
           navId: options.navId,
           params: options.params,
-          previousNextUrl: pending.previousNextUrl,
+          previousNextUrl: approvedCommit.previousNextUrl,
         }),
       );
       activateNavigationSnapshot();
       snapshotActivated = true;
-      dispatchBrowserTree(
-        pending.action.elements,
-        options.navigationSnapshot,
-        renderId,
-        options.actionType,
-        pending.interceptionContext,
-        pending.action.layoutFlags,
-        pending.previousNextUrl,
-        pending.routeId,
-        pending.rootLayoutTreePath,
-        pending.action.operation,
+      dispatchApprovedVisibleCommit(
+        approvedCommit,
         options.pendingRouterState,
         options.useTransition ?? true,
       );
@@ -521,12 +485,11 @@ export function createAppBrowserNavigationController(
     // the same race, and Next.js has similar behavior. Tightening this would
     // need a stronger commit-version gate than activeNavigationId alone.
     const {
-      disposition,
-      pending,
+      approvedCommit,
+      decision,
       // Intentionally retained as #726-OPS-01 trace-shell scaffolding. The
-      // current same-URL action path still commits through legacy control flow;
-      // later lifecycle gates can consume this trace without changing the
-      // classifier contract again.
+      // same-URL action path can consume this trace once later lifecycle gates
+      // need an observable commit explanation.
       trace: _navigationTrace,
     } = await resolveAndClassifyNavigationCommit({
       activeNavigationId,
@@ -539,26 +502,13 @@ export function createAppBrowserNavigationController(
       type: "navigate",
     });
 
-    if (disposition === "hard-navigate") {
+    if (decision.disposition === "hard-navigate") {
       window.location.assign(window.location.href);
       return undefined;
     }
 
-    if (disposition === "dispatch") {
-      dispatchBrowserTree(
-        pending.action.elements,
-        navigationSnapshot,
-        pending.action.renderId,
-        "navigate",
-        pending.interceptionContext,
-        pending.action.layoutFlags,
-        pending.previousNextUrl,
-        pending.routeId,
-        pending.rootLayoutTreePath,
-        pending.action.operation,
-        null,
-        false,
-      );
+    if (approvedCommit) {
+      dispatchApprovedVisibleCommit(approvedCommit, null, false);
     }
 
     // Same-URL server actions still return their action value even if the UI

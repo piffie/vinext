@@ -23,7 +23,7 @@ import type { Server as HttpServer } from "node:http";
 import type { Route } from "../routing/pages-router.js";
 import type { AppRoute } from "../routing/app-router.js";
 import type { ResolvedNextConfig } from "../config/next-config.js";
-import { classifyPagesRoute, classifyAppRoute } from "./report.js";
+import { classifyPagesRoute, classifyAppRoute, getAppRouteRenderEntryPath } from "./report.js";
 import {
   NoOpCacheHandler,
   setCacheHandler,
@@ -413,6 +413,7 @@ export async function prerenderPages({
             // either _prodServer or pagesBundlePath is provided.
             outDir: path.dirname(path.dirname(pagesBundlePath!)),
             noCompression: true,
+            purpose: "prerender",
           });
           ownedProdServerHandle = srv;
           return srv;
@@ -746,6 +747,7 @@ export async function prerenderApp({
             host: "127.0.0.1",
             outDir: path.dirname(serverDir),
             noCompression: true,
+            purpose: "prerender",
           });
           ownedProdServerHandle = srv;
           return srv;
@@ -836,20 +838,21 @@ export async function prerenderApp({
     const urlsToRender: UrlToRender[] = [];
 
     for (const route of routes) {
-      // API-only route handler (no page component)
-      if (route.routePath && !route.pagePath) {
+      const renderEntryPath = getAppRouteRenderEntryPath(route);
+
+      if (!renderEntryPath && route.routePath) {
         results.push({ route: route.pattern, status: "skipped", reason: "api" });
         continue;
       }
 
-      if (!route.pagePath) continue;
+      if (!renderEntryPath) continue;
 
       // Use static analysis classification, but note its limitations for dynamic URLs:
       // classifyAppRoute() returns 'ssr' for dynamic URLs with no explicit config,
       // meaning "unknown — could have generateStaticParams". We must check
       // generateStaticParams first before applying the ssr skip/error logic.
       const { type, revalidate: classifiedRevalidate } = classifyAppRoute(
-        route.pagePath,
+        renderEntryPath,
         route.routePath,
         route.isDynamic,
       );

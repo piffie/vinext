@@ -2,10 +2,18 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
 import React from "react";
 import {
+  APP_ARTIFACT_COMPATIBILITY_KEY,
   APP_LAYOUT_FLAGS_KEY,
+  APP_ROOT_LAYOUT_KEY,
   isAppElementsRecord,
   type AppOutgoingElements,
 } from "../packages/vinext/src/server/app-elements.js";
+import {
+  APP_ELEMENTS_SCHEMA_VERSION,
+  ARTIFACT_COMPATIBILITY_SCHEMA_VERSION,
+  createArtifactCompatibilityGraphVersion,
+  RSC_PAYLOAD_SCHEMA_VERSION,
+} from "../packages/vinext/src/server/artifact-compatibility.js";
 import type { LayoutClassificationOptions } from "../packages/vinext/src/server/app-page-execution.js";
 import { renderAppPageLifecycle } from "../packages/vinext/src/server/app-page-render.js";
 
@@ -766,6 +774,41 @@ describe("layoutFlags injection into RSC payload", () => {
 
     await renderAppPageLifecycle(options);
     expect(getCapturedElement()[APP_LAYOUT_FLAGS_KEY]).toEqual({});
+  });
+
+  it("injects concrete artifact compatibility metadata from the render boundary", async () => {
+    const originalBuildId = process.env.__VINEXT_BUILD_ID;
+    process.env.__VINEXT_BUILD_ID = "deploy-test";
+    const { options, getCapturedElement } = createRscOptions({
+      element: {
+        [APP_ROOT_LAYOUT_KEY]: "/(shop)",
+        "layout:/(shop)": "shop-layout",
+        "page:/shop": "shop-page",
+      },
+    });
+
+    try {
+      await renderAppPageLifecycle(options);
+    } finally {
+      if (originalBuildId === undefined) {
+        delete process.env.__VINEXT_BUILD_ID;
+      } else {
+        process.env.__VINEXT_BUILD_ID = originalBuildId;
+      }
+    }
+
+    expect(getCapturedElement()[APP_ARTIFACT_COMPATIBILITY_KEY]).toEqual({
+      schemaVersion: ARTIFACT_COMPATIBILITY_SCHEMA_VERSION,
+      graphVersion: createArtifactCompatibilityGraphVersion({
+        routePattern: "/test",
+        rootBoundaryId: "/(shop)",
+      }),
+      deploymentVersion: "deploy-test",
+      appElementsSchemaVersion: APP_ELEMENTS_SCHEMA_VERSION,
+      rscPayloadSchemaVersion: RSC_PAYLOAD_SCHEMA_VERSION,
+      rootBoundaryId: "/(shop)",
+      renderEpoch: null,
+    });
   });
 
   it("injects __layoutFlags for multiple independently classified layouts", async () => {

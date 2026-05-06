@@ -478,6 +478,31 @@ describe("prerenderApp — default mode (app-basic)", () => {
     expect(r).toMatchObject({ route: "/dashboard", status: "rendered", revalidate: false });
   });
 
+  it("renders layout-only routes whose content comes from parallel slots", () => {
+    // Ported from Next.js: test/e2e/app-dir/parallel-routes-and-interception/parallel-routes-and-interception.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/parallel-routes-and-interception/parallel-routes-and-interception.test.ts
+    const parent = findRoute(results, "/parallel-nested/home");
+    expect(parent).toMatchObject({
+      route: "/parallel-nested/home",
+      status: "rendered",
+      revalidate: false,
+    });
+
+    const nested = findRoute(results, "/parallel-nested/home/nested");
+    expect(nested).toMatchObject({
+      route: "/parallel-nested/home/nested",
+      status: "rendered",
+      revalidate: false,
+    });
+
+    const defaultOnly = findRoute(results, "/slot-collision");
+    expect(defaultOnly).toMatchObject({
+      route: "/slot-collision",
+      status: "rendered",
+      revalidate: false,
+    });
+  });
+
   it("skips /headers-test (unknown route that calls headers())", () => {
     const r = findRoute(results, "/headers-test");
     // headers-test calls headers() — should be skipped as dynamic

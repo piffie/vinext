@@ -10,7 +10,7 @@
  * vi.resetModules() + dynamic import().
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vite-plus/test";
-import { createAppPayloadCacheKey } from "../packages/vinext/src/server/app-elements.js";
+import { AppElementsWire } from "../packages/vinext/src/server/app-elements.js";
 
 type Navigation = typeof import("../packages/vinext/src/shims/navigation.js");
 let storePrefetchResponse: Navigation["storePrefetchResponse"];
@@ -116,7 +116,9 @@ describe("prefetch cache eviction", () => {
 
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetchedUrl).toMatch(/^\/dashboard\.rsc\?tab=1&_rsc(?:=.+)?$/);
-    expect(getPrefetchedUrls().has(createAppPayloadCacheKey(String(fetchedUrl), "/"))).toBe(true);
+    expect(getPrefetchedUrls().has(AppElementsWire.encodeCacheKey(String(fetchedUrl), "/"))).toBe(
+      true,
+    );
   });
 
   it("reuses a prefetched response only when mounted-slot context matches", () => {
@@ -171,8 +173,8 @@ describe("prefetch cache eviction", () => {
     storePrefetchResponse("/photos/42.rsc", new Response("feed"), "/feed");
     storePrefetchResponse("/photos/42.rsc", new Response("gallery"), "/gallery");
 
-    const feedKey = createAppPayloadCacheKey("/photos/42.rsc", "/feed");
-    const galleryKey = createAppPayloadCacheKey("/photos/42.rsc", "/gallery");
+    const feedKey = AppElementsWire.encodeCacheKey("/photos/42.rsc", "/feed");
+    const galleryKey = AppElementsWire.encodeCacheKey("/photos/42.rsc", "/gallery");
     expect(feedKey).not.toBe(galleryKey);
     expect(getPrefetchCache().has(feedKey)).toBe(true);
     expect(getPrefetchCache().has(galleryKey)).toBe(true);

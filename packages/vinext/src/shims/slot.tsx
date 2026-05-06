@@ -1,7 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { UNMATCHED_SLOT, type AppElementValue, type AppElements } from "../server/app-elements.js";
+import {
+  AppElementsWire,
+  UNMATCHED_SLOT,
+  type AppElementValue,
+  type AppElements,
+} from "../server/app-elements.js";
 import { notFound } from "./navigation.js";
 
 const EMPTY_ELEMENTS: AppElements = Object.freeze({});
@@ -32,7 +37,11 @@ export function mergeElements(
   // instead of firing notFound(). Only hard navigation (full page load) should 404.
   // This matches Next.js behavior for parallel route persistence.
   for (const key of Object.keys(merged)) {
-    if (key.startsWith("slot:") && merged[key] === UNMATCHED_SLOT && Object.hasOwn(prev, key)) {
+    if (
+      AppElementsWire.isSlotId(key) &&
+      merged[key] === UNMATCHED_SLOT &&
+      Object.hasOwn(prev, key)
+    ) {
       merged[key] = prev[key];
     }
   }
@@ -43,7 +52,7 @@ export function mergeElements(
   // slots that should be preserved.
   if (clearAbsentSlots) {
     for (const key of Object.keys(merged)) {
-      if (key.startsWith("slot:") && !Object.hasOwn(next, key)) {
+      if (AppElementsWire.isSlotId(key) && !Object.hasOwn(next, key)) {
         delete merged[key];
       }
     }
@@ -63,7 +72,7 @@ export function Slot({
   const elements = React.useContext(ElementsContext);
 
   if (!Object.hasOwn(elements, id)) {
-    if (process.env.NODE_ENV !== "production" && !id.startsWith("slot:")) {
+    if (process.env.NODE_ENV !== "production" && !AppElementsWire.isSlotId(id)) {
       if (!warnedMissingEntryIds.has(id)) {
         warnedMissingEntryIds.add(id);
         console.warn("[vinext] Missing App Router element entry during render: " + id);

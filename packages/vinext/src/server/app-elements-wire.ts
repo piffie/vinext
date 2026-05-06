@@ -1,7 +1,13 @@
 import { isValidElement, type ReactNode } from "react";
+import {
+  createArtifactCompatibilityEnvelope,
+  parseArtifactCompatibilityEnvelope,
+  type ArtifactCompatibilityEnvelope,
+} from "./artifact-compatibility.js";
 
 const APP_INTERCEPTION_SEPARATOR = "\0";
 
+export const APP_ARTIFACT_COMPATIBILITY_KEY = "__artifactCompatibility";
 export const APP_INTERCEPTION_CONTEXT_KEY = "__interceptionContext";
 export const APP_LAYOUT_FLAGS_KEY = "__layoutFlags";
 export const APP_ROUTE_KEY = "__route";
@@ -36,11 +42,19 @@ export type AppWireElements = Readonly<Record<string, AppWireElementValue>>;
 export type LayoutFlags = Readonly<Record<string, "s" | "d">>;
 
 type AppElementsMetadata = {
+  artifactCompatibility: ArtifactCompatibilityEnvelope;
   interceptionContext: string | null;
   layoutFlags: LayoutFlags;
   routeId: string;
   rootLayoutTreePath: string | null;
 };
+
+type AppElementsWireElementKey =
+  | { kind: "layout"; treePath: string }
+  | { interceptionContext: string | null; kind: "page"; path: string }
+  | { interceptionContext: string | null; kind: "route"; path: string }
+  | { kind: "slot"; name: string; treePath: string }
+  | { kind: "template"; treePath: string };
 
 type AppElementsWireMetadataInput = {
   interceptionContext: string | null;
@@ -60,9 +74,12 @@ type AppElementsWireMetadataEntries = Readonly<{
  * known keys (e.g. __layoutFlags). Distinct from AppElements / AppWireElements
  * which only carry render-time values.
  */
-export type AppOutgoingElements = Readonly<Record<string, ReactNode | LayoutFlags>>;
+export type AppOutgoingElements = Readonly<
+  Record<string, ReactNode | LayoutFlags | ArtifactCompatibilityEnvelope>
+>;
 
 type AppElementsWireKeys = {
+  readonly artifactCompatibility: typeof APP_ARTIFACT_COMPATIBILITY_KEY;
   readonly interceptionContext: typeof APP_INTERCEPTION_CONTEXT_KEY;
   readonly layoutFlags: typeof APP_LAYOUT_FLAGS_KEY;
   readonly rootLayout: typeof APP_ROOT_LAYOUT_KEY;
@@ -75,12 +92,18 @@ type AppElementsWireCodec = {
   createMetadataEntries(input: AppElementsWireMetadataInput): AppElementsWireMetadataEntries;
   decode(elements: AppWireElements): AppElements;
   encodeCacheKey(rscUrl: string, interceptionContext: string | null): string;
+  encodeLayoutId(treePath: string): string;
   encodeOutgoingPayload(input: {
     element: ReactNode | Readonly<Record<string, ReactNode>>;
+    artifactCompatibility?: ArtifactCompatibilityEnvelope;
     layoutFlags: LayoutFlags;
   }): ReactNode | AppOutgoingElements;
   encodePageId(routePath: string, interceptionContext: string | null): string;
   encodeRouteId(routePath: string, interceptionContext: string | null): string;
+  encodeSlotId(slotName: string, treePath: string): string;
+  encodeTemplateId(treePath: string): string;
+  isSlotId(key: string): boolean;
+  parseElementKey(key: string): AppElementsWireElementKey | null;
   readMetadata(elements: Readonly<Record<string, unknown>>): AppElementsMetadata;
   withLayoutFlags<T extends Record<string, unknown>>(
     elements: T,
@@ -94,10 +117,7 @@ function appendInterceptionContext(identity: string, interceptionContext: string
     : `${identity}${APP_INTERCEPTION_SEPARATOR}${interceptionContext}`;
 }
 
-export function createAppPayloadRouteId(
-  routePath: string,
-  interceptionContext: string | null,
-): string {
+function createAppPayloadRouteId(routePath: string, interceptionContext: string | null): string {
   return appendInterceptionContext(`route:${routePath}`, interceptionContext);
 }
 
@@ -105,11 +125,84 @@ function createAppPayloadPageId(routePath: string, interceptionContext: string |
   return appendInterceptionContext(`page:${routePath}`, interceptionContext);
 }
 
-export function createAppPayloadCacheKey(
-  rscUrl: string,
-  interceptionContext: string | null,
-): string {
+function createAppPayloadLayoutId(treePath: string): string {
+  return `layout:${treePath}`;
+}
+
+function createAppPayloadTemplateId(treePath: string): string {
+  return `template:${treePath}`;
+}
+
+function createAppPayloadSlotId(slotName: string, treePath: string): string {
+  return `slot:${slotName}:${treePath}`;
+}
+
+function createAppPayloadCacheKey(rscUrl: string, interceptionContext: string | null): string {
   return appendInterceptionContext(rscUrl, interceptionContext);
+}
+
+function parsePathWithInterception(input: string): {
+  interceptionContext: string | null;
+  path: string;
+} | null {
+  const separatorIndex = input.indexOf(APP_INTERCEPTION_SEPARATOR);
+  const path = separatorIndex === -1 ? input : input.slice(0, separatorIndex);
+  if (!path.startsWith("/")) return null;
+
+  return {
+    interceptionContext: separatorIndex === -1 ? null : input.slice(separatorIndex + 1),
+    path,
+  };
+}
+
+/**
+ * AppElements tree paths are absolute route-tree paths on the wire.
+ * Bare segment names are not valid layout/template/slot tree identities.
+ */
+function parseTreePath(input: string): string | null {
+  return input.startsWith("/") ? input : null;
+}
+
+function parseAppElementsWireElementKey(key: string): AppElementsWireElementKey | null {
+  if (key.startsWith("route:")) {
+    const parsed = parsePathWithInterception(key.slice("route:".length));
+    if (!parsed) return null;
+    return { interceptionContext: parsed.interceptionContext, kind: "route", path: parsed.path };
+  }
+
+  if (key.startsWith("page:")) {
+    const parsed = parsePathWithInterception(key.slice("page:".length));
+    if (!parsed) return null;
+    return { interceptionContext: parsed.interceptionContext, kind: "page", path: parsed.path };
+  }
+
+  if (key.startsWith("layout:")) {
+    const treePath = parseTreePath(key.slice("layout:".length));
+    return treePath ? { kind: "layout", treePath } : null;
+  }
+
+  if (key.startsWith("template:")) {
+    const treePath = parseTreePath(key.slice("template:".length));
+    return treePath ? { kind: "template", treePath } : null;
+  }
+
+  if (key.startsWith("slot:")) {
+    const body = key.slice("slot:".length);
+    const separatorIndex = body.indexOf(":");
+    if (separatorIndex <= 0) return null;
+    const name = body.slice(0, separatorIndex);
+    const treePath = parseTreePath(body.slice(separatorIndex + 1));
+    return treePath ? { kind: "slot", name, treePath } : null;
+  }
+
+  return null;
+}
+
+function isAppElementsWireSlotId(key: string): boolean {
+  if (!key.startsWith("slot:")) return false;
+  const body = key.slice("slot:".length);
+  const separatorIndex = body.indexOf(":");
+  return separatorIndex > 0 && body.charCodeAt(separatorIndex + 1) === 0x2f;
 }
 
 function createAppElementsWireMetadataEntries(
@@ -125,7 +218,7 @@ function createAppElementsWireMetadataEntries(
 export function normalizeAppElements(elements: AppWireElements): AppElements {
   let needsNormalization = false;
   for (const [key, value] of Object.entries(elements)) {
-    if (key.startsWith("slot:") && value === APP_UNMATCHED_SLOT_WIRE_VALUE) {
+    if (isAppElementsWireSlotId(key) && value === APP_UNMATCHED_SLOT_WIRE_VALUE) {
       needsNormalization = true;
       break;
     }
@@ -138,7 +231,9 @@ export function normalizeAppElements(elements: AppWireElements): AppElements {
   const normalized: Record<string, AppElementValue> = {};
   for (const [key, value] of Object.entries(elements)) {
     normalized[key] =
-      key.startsWith("slot:") && value === APP_UNMATCHED_SLOT_WIRE_VALUE ? UNMATCHED_SLOT : value;
+      isAppElementsWireSlotId(key) && value === APP_UNMATCHED_SLOT_WIRE_VALUE
+        ? UNMATCHED_SLOT
+        : value;
   }
 
   return normalized;
@@ -182,12 +277,29 @@ export function withLayoutFlags<T extends Record<string, unknown>>(
 
 export function buildOutgoingAppPayload(input: {
   element: ReactNode | Readonly<Record<string, ReactNode>>;
+  artifactCompatibility?: ArtifactCompatibilityEnvelope;
   layoutFlags: LayoutFlags;
 }): ReactNode | AppOutgoingElements {
   if (!isAppElementsRecord(input.element)) {
     return input.element;
   }
-  return withLayoutFlags(input.element, input.layoutFlags);
+  return {
+    ...input.element,
+    [APP_LAYOUT_FLAGS_KEY]: input.layoutFlags,
+    [APP_ARTIFACT_COMPATIBILITY_KEY]:
+      input.artifactCompatibility ?? createArtifactCompatibilityEnvelope(),
+  };
+}
+
+function readArtifactCompatibilityMetadata(value: unknown): ArtifactCompatibilityEnvelope {
+  if (value === undefined) return createArtifactCompatibilityEnvelope();
+
+  const artifactCompatibility = parseArtifactCompatibilityEnvelope(value);
+  // TODO(#726-COMPAT-04): hard-fail malformed compatibility metadata once
+  // cache/skip consumers depend on this proof. During Wave01 the field is
+  // emitted as scaffolding, so bad or future-version values degrade like
+  // missing __layoutFlags instead of crashing render paths that do not read it.
+  return artifactCompatibility ?? createArtifactCompatibilityEnvelope();
 }
 
 export function readAppElementsMetadata(
@@ -216,8 +328,12 @@ export function readAppElementsMetadata(
   }
 
   const layoutFlags = parseLayoutFlags(elements[APP_LAYOUT_FLAGS_KEY]);
+  const artifactCompatibility = readArtifactCompatibilityMetadata(
+    elements[APP_ARTIFACT_COMPATIBILITY_KEY],
+  );
 
   return {
+    artifactCompatibility,
     interceptionContext: interceptionContext ?? null,
     layoutFlags,
     routeId,
@@ -229,6 +345,7 @@ export const AppElementsWire: AppElementsWireCodec = {
   // WIRE follow-ups use these stable key names when moving payload readers and writers
   // behind the codec boundary.
   keys: {
+    artifactCompatibility: APP_ARTIFACT_COMPATIBILITY_KEY,
     interceptionContext: APP_INTERCEPTION_CONTEXT_KEY,
     layoutFlags: APP_LAYOUT_FLAGS_KEY,
     rootLayout: APP_ROOT_LAYOUT_KEY,
@@ -238,9 +355,14 @@ export const AppElementsWire: AppElementsWireCodec = {
   createMetadataEntries: createAppElementsWireMetadataEntries,
   decode: normalizeAppElements,
   encodeCacheKey: createAppPayloadCacheKey,
+  encodeLayoutId: createAppPayloadLayoutId,
   encodeOutgoingPayload: buildOutgoingAppPayload,
   encodePageId: createAppPayloadPageId,
   encodeRouteId: createAppPayloadRouteId,
+  encodeSlotId: createAppPayloadSlotId,
+  encodeTemplateId: createAppPayloadTemplateId,
+  isSlotId: isAppElementsWireSlotId,
+  parseElementKey: parseAppElementsWireElementKey,
   readMetadata: readAppElementsMetadata,
   withLayoutFlags,
 };

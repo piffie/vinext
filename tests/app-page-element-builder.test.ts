@@ -98,8 +98,8 @@ describe("buildPageElements", () => {
     const result = await buildPageElements(createBaseOptions({ route }));
 
     const record = result as Record<string, unknown>;
-    // The error payload uses createAppPayloadRouteId which prefixes "route:"
-    // to build the key and the __route metadata.
+    // The error payload uses the AppElementsWire route-id encoder for both
+    // the entry key and the __route metadata.
     expect(record[APP_ROUTE_KEY]).toBe("route:/test");
     expect(record[APP_INTERCEPTION_CONTEXT_KEY]).toBe(null);
     expect(Object.prototype.hasOwnProperty.call(record, APP_ROOT_LAYOUT_KEY)).toBe(true);

@@ -43,6 +43,23 @@ export type RouteRow = {
   prerendered?: boolean;
 };
 
+type AppRouteRenderEntry = Pick<AppRoute, "pagePath" | "routePath" | "parallelSlots">;
+
+export function getAppRouteRenderEntryPath(route: AppRouteRenderEntry): string | null {
+  if (route.pagePath) return route.pagePath;
+  if (route.routePath) return null;
+
+  for (const slot of route.parallelSlots) {
+    if (slot.pagePath) return slot.pagePath;
+  }
+
+  for (const slot of route.parallelSlots) {
+    if (slot.defaultPath) return slot.defaultPath;
+  }
+
+  return null;
+}
+
 // ─── Regex-based export detection ────────────────────────────────────────────
 
 /**
@@ -794,7 +811,12 @@ export function buildReportRows(options: {
   }
 
   for (const route of options.appRoutes ?? []) {
-    const { type, revalidate } = classifyAppRoute(route.pagePath, route.routePath, route.isDynamic);
+    const renderEntryPath = getAppRouteRenderEntryPath(route);
+    const { type, revalidate } = classifyAppRoute(
+      renderEntryPath,
+      route.routePath,
+      route.isDynamic,
+    );
     if (type === "unknown" && renderedRoutes.has(route.pattern)) {
       // Speculative prerender confirmed this route is static.
       rows.push({ pattern: route.pattern, type: "static", prerendered: true });

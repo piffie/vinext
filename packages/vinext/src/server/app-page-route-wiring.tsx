@@ -189,7 +189,7 @@ export function createAppPageLayoutEntries<
     return {
       errorModule: route.errors?.[index] ?? null,
       forbiddenModule: route.forbiddens?.[index] ?? null,
-      id: `layout:${treePath}`,
+      id: AppElementsWire.encodeLayoutId(treePath),
       layoutModule,
       notFoundModule: route.notFounds?.[index] ?? null,
       unauthorizedModule: route.unauthorizeds?.[index] ?? null,
@@ -209,7 +209,7 @@ function createAppPageTemplateEntries<TModule extends AppPageModule>(
     const treePosition = route.templateTreePositions?.[index] ?? 0;
     const treePath = createAppPageTreePath(route.routeSegments, treePosition);
     return {
-      id: `template:${treePath}`,
+      id: AppElementsWire.encodeTemplateId(treePath),
       templateModule,
       treePath,
       treePosition,
@@ -312,7 +312,7 @@ function createAppPageParallelSlotEntries<
       : [];
     parallelSlots[slotName] = (
       <LayoutSegmentProvider segmentMap={{ children: slotSegments }}>
-        <Slot id={`slot:${slotName}:${treePath}`} />
+        <Slot id={AppElementsWire.encodeSlotId(slotName, treePath)} />
       </LayoutSegmentProvider>
     );
   }
@@ -494,7 +494,7 @@ export function buildAppPageElements<
     const slotName = slot.name;
     const targetIndex = slot.layoutIndex >= 0 ? slot.layoutIndex : layoutEntries.length - 1;
     const treePath = layoutEntries[targetIndex]?.treePath ?? "/";
-    const slotId = `slot:${slotName}:${treePath}`;
+    const slotId = AppElementsWire.encodeSlotId(slotName, treePath);
     const slotOverride = resolveSlotOverride(slotKey, slotName);
     const slotParams = getEffectiveSlotParams(slotKey, slotName);
     const overrideOrPageComponent =

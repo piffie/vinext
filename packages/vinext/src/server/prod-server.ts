@@ -80,6 +80,12 @@ export type ProdServerOptions = {
   outDir?: string;
   /** Disable compression (default: false) */
   noCompression?: boolean;
+  /**
+   * Narrow startup context for callers that need a more precise log line.
+   * Omitted for normal `vinext start` so the existing production-server output
+   * remains stable.
+   */
+  purpose?: "prerender";
 };
 
 /** Content types that benefit from compression. */
@@ -255,6 +261,16 @@ type ResponseWithVinextStreamingMetadata = Response & {
 
 function isVinextStreamedHtmlResponse(response: Response): boolean {
   return (response as ResponseWithVinextStreamingMetadata).__vinextStreamedHtmlResponse === true;
+}
+
+function logProdServerStarted(host: string, port: number, purpose: ProdServerOptions["purpose"]) {
+  const url = `http://${host}:${port}`;
+  if (purpose === "prerender") {
+    console.log(`[vinext] Production server for prerendering running at ${url}`);
+    return;
+  }
+
+  console.log(`[vinext] Production server running at ${url}`);
 }
 
 /**
@@ -833,6 +849,7 @@ export async function startProdServer(options: ProdServerOptions = {}) {
     host = "0.0.0.0",
     outDir = path.resolve("dist"),
     noCompression = false,
+    purpose,
   } = options;
 
   const compress = !noCompression;
@@ -852,10 +869,10 @@ export async function startProdServer(options: ProdServerOptions = {}) {
   }
 
   if (isAppRouter) {
-    return startAppRouterServer({ port, host, clientDir, rscEntryPath, compress });
+    return startAppRouterServer({ port, host, clientDir, rscEntryPath, compress, purpose });
   }
 
-  return startPagesRouterServer({ port, host, clientDir, serverEntryPath, compress });
+  return startPagesRouterServer({ port, host, clientDir, serverEntryPath, compress, purpose });
 }
 
 // ─── App Router Production Server ─────────────────────────────────────────────
@@ -866,6 +883,7 @@ type AppRouterServerOptions = {
   clientDir: string;
   rscEntryPath: string;
   compress: boolean;
+  purpose?: ProdServerOptions["purpose"];
 };
 
 type WorkerAppRouterEntry = {
@@ -921,7 +939,7 @@ function resolveAppRouterHandler(entry: unknown): (request: Request) => Promise<
  * 4. Stream the Web Response back (with optional compression)
  */
 async function startAppRouterServer(options: AppRouterServerOptions) {
-  const { port, host, clientDir, rscEntryPath, compress } = options;
+  const { port, host, clientDir, rscEntryPath, compress, purpose } = options;
 
   // Load image config written at build time by vinext:image-config plugin.
   // This provides SVG/security header settings for the image optimization endpoint.
@@ -1128,7 +1146,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     server.listen(port, host, () => {
       const addr = server.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      console.log(`[vinext] Production server running at http://${host}:${actualPort}`);
+      logProdServerStarted(host, actualPort, purpose);
       resolve();
     });
   });
@@ -1146,6 +1164,7 @@ type PagesRouterServerOptions = {
   clientDir: string;
   serverEntryPath: string;
   compress: boolean;
+  purpose?: ProdServerOptions["purpose"];
 };
 
 /**
@@ -1158,7 +1177,7 @@ type PagesRouterServerOptions = {
  * - vinextConfig — embedded next.config.js settings
  */
 async function startPagesRouterServer(options: PagesRouterServerOptions) {
-  const { port, host, clientDir, serverEntryPath, compress } = options;
+  const { port, host, clientDir, serverEntryPath, compress, purpose } = options;
 
   // Import the server entry module (use file:// URL for reliable dynamic import).
   // Cache-bust with mtime so that rebuilds to the same output path always load
@@ -1727,7 +1746,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
     server.listen(port, host, () => {
       const addr = server.address();
       const actualPort = typeof addr === "object" && addr ? addr.port : port;
-      console.log(`[vinext] Production server running at http://${host}:${actualPort}`);
+      logProdServerStarted(host, actualPort, purpose);
       resolve();
     });
   });

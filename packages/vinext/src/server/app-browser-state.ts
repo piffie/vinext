@@ -66,7 +66,7 @@ export type AppRouterAction = {
   type: "navigate" | "replace" | "traverse";
 };
 
-type PendingNavigationCommit = {
+export type PendingNavigationCommit = {
   action: AppRouterAction;
   interceptionContext: string | null;
   previousNextUrl: string | null;
@@ -77,11 +77,6 @@ type PendingNavigationCommit = {
 type PendingNavigationCommitDisposition = "dispatch" | "hard-navigate" | "skip";
 type PendingNavigationCommitDispositionDecision = {
   disposition: PendingNavigationCommitDisposition;
-  trace: NavigationTrace;
-};
-type ClassifiedPendingNavigationCommit = {
-  disposition: PendingNavigationCommitDisposition;
-  pending: PendingNavigationCommit;
   trace: NavigationTrace;
 };
 
@@ -383,40 +378,5 @@ export async function createPendingNavigationCommit(options: {
     previousNextUrl,
     rootLayoutTreePath: metadata.rootLayoutTreePath,
     routeId: metadata.routeId,
-  };
-}
-
-export async function resolveAndClassifyNavigationCommit(options: {
-  activeNavigationId: number;
-  currentState: AppRouterState;
-  navigationSnapshot: ClientNavigationRenderSnapshot;
-  nextElements: Promise<AppElements>;
-  operationLane: OperationLane;
-  previousNextUrl?: string | null;
-  renderId: number;
-  startedNavigationId: number;
-  type: "navigate" | "replace" | "traverse";
-}): Promise<ClassifiedPendingNavigationCommit> {
-  const pending = await createPendingNavigationCommit({
-    currentState: options.currentState,
-    nextElements: options.nextElements,
-    navigationSnapshot: options.navigationSnapshot,
-    operationLane: options.operationLane,
-    previousNextUrl: options.previousNextUrl,
-    renderId: options.renderId,
-    type: options.type,
-  });
-
-  const decision = resolvePendingNavigationCommitDispositionDecision({
-    activeNavigationId: options.activeNavigationId,
-    currentRootLayoutTreePath: options.currentState.rootLayoutTreePath,
-    nextRootLayoutTreePath: pending.rootLayoutTreePath,
-    startedNavigationId: options.startedNavigationId,
-  });
-
-  return {
-    disposition: decision.disposition,
-    pending,
-    trace: decision.trace,
   };
 }

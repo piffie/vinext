@@ -192,6 +192,7 @@ export async function runPrerender(options: RunPrerenderOptions): Promise<Preren
         host: "127.0.0.1",
         outDir: path.dirname(serverDir),
         noCompression: true,
+        purpose: "prerender",
       });
 
       // Read the prerender secret from vinext-server.json so it can be passed

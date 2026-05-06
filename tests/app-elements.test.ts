@@ -158,6 +158,7 @@ describe("AppElementsWire", () => {
     if (!isAppElementsRecord(payload)) return;
 
     expect(AppElementsWire.readMetadata(payload)).toEqual({
+      artifactCompatibility: createArtifactCompatibilityEnvelope(),
       interceptionContext: null,
       layoutFlags: { [AppElementsWire.encodeLayoutId("/")]: "s" },
       rootLayoutTreePath: "/",

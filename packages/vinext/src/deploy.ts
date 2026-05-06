@@ -1236,7 +1236,7 @@ export function resolveWranglerBin(
   platform: NodeJS.Platform = process.platform,
 ): string {
   const candidates =
-    platform === "win32" ? [".bin/wrangler.CMD", ".bin/wrangler"] : [".bin/wrangler"];
+    platform === "win32" ? [".bin/wrangler.CMD", ".bin/wrangler.cmd", ".bin/wrangler"] : [".bin/wrangler"];
 
   for (const candidate of candidates) {
     const found = _findInNodeModules(root, candidate);

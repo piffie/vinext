@@ -15,6 +15,7 @@ import {
   renameCJSConfigs,
   buildWranglerDeployArgs,
   parseDeployArgs,
+  resolveWranglerBin,
   isPackageResolvable,
   viteConfigHasCloudflarePlugin,
   hasWranglerConfig,
@@ -92,6 +93,53 @@ describe("buildWranglerDeployArgs", () => {
 
   it("treats empty string env as production", () => {
     expect(buildWranglerDeployArgs({ env: "" })).toEqual({ args: ["deploy"], env: undefined });
+  });
+});
+
+// ─── Wrangler bin resolution (Windows shim handling) ────────────────────────
+
+describe("resolveWranglerBin", () => {
+  it("uses bare name on non-Windows platforms", () => {
+    mkdir(tmpDir, "node_modules/.bin");
+    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+
+    const resolved = resolveWranglerBin(tmpDir, "linux");
+    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
+  });
+
+  it("prefers .CMD shim on Windows when present", () => {
+    mkdir(tmpDir, "node_modules/.bin");
+    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+    writeFile(tmpDir, "node_modules/.bin/wrangler.CMD", "@ECHO off");
+
+    const resolved = resolveWranglerBin(tmpDir, "win32");
+    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"));
+  });
+
+  it("falls back to bare name on Windows if no .CMD shim exists", () => {
+    mkdir(tmpDir, "node_modules/.bin");
+    writeFile(tmpDir, "node_modules/.bin/wrangler", "#!/usr/bin/env node");
+
+    const resolved = resolveWranglerBin(tmpDir, "win32");
+    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler"));
+  });
+
+  it("walks up to a hoisted workspace node_modules on Windows", () => {
+    mkdir(tmpDir, "apps/web");
+    mkdir(tmpDir, "node_modules/.bin");
+    writeFile(tmpDir, "node_modules/.bin/wrangler.CMD", "@ECHO off");
+
+    const resolved = resolveWranglerBin(path.join(tmpDir, "apps", "web"), "win32");
+    expect(resolved).toBe(path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"));
+  });
+
+  it("returns platform-appropriate fallback path when nothing is found", () => {
+    expect(resolveWranglerBin(tmpDir, "win32")).toBe(
+      path.join(tmpDir, "node_modules", ".bin", "wrangler.CMD"),
+    );
+    expect(resolveWranglerBin(tmpDir, "linux")).toBe(
+      path.join(tmpDir, "node_modules", ".bin", "wrangler"),
+    );
   });
 });
 

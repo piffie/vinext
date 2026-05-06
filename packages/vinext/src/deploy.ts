@@ -1218,12 +1218,37 @@ export function buildWranglerDeployArgs(
   return { args, env };
 }
 
+/**
+ * Resolve the wrangler executable in node_modules.
+ *
+ * Walks up ancestor directories so the binary is found even when node_modules
+ * is hoisted to the workspace root in a monorepo.
+ *
+ * On Windows, `node_modules/.bin/` contains both a Unix shebang script (no
+ * extension) and a `.CMD` shim. Node's `execFileSync` uses CreateProcess(),
+ * which only resolves PATHEXT extensions (`.cmd`, `.exe`, ...) — spawning the
+ * bare-name shebang file fails with ENOENT even though the file exists. So on
+ * Windows we prefer the `.CMD` shim and only fall back to the bare name for a
+ * clearer error message if neither is present.
+ */
+export function resolveWranglerBin(
+  root: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const candidates =
+    platform === "win32" ? [".bin/wrangler.CMD", ".bin/wrangler"] : [".bin/wrangler"];
+
+  for (const candidate of candidates) {
+    const found = _findInNodeModules(root, candidate);
+    if (found) return found;
+  }
+
+  // Not found — return platform-appropriate path under root for error clarity.
+  return path.join(root, "node_modules", ...candidates[0].split("/"));
+}
+
 function runWranglerDeploy(root: string, options: Pick<DeployOptions, "preview" | "env">): string {
-  // Walk up ancestor directories so the binary is found even when node_modules
-  // is hoisted to the workspace root in a monorepo.
-  const wranglerBin =
-    _findInNodeModules(root, ".bin/wrangler") ??
-    path.join(root, "node_modules", ".bin", "wrangler"); // fallback for error message clarity
+  const wranglerBin = resolveWranglerBin(root);
 
   const execOpts: ExecSyncOptions = {
     cwd: root,

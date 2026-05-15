@@ -1,6 +1,6 @@
 import { runWithFetchDedupe } from "vinext/shims/fetch-cache";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
-import { VINEXT_RSC_VARY_HEADER } from "./app-rsc-cache-busting.js";
+import { VINEXT_RSC_VARY_HEADER, applyRscCompatibilityIdHeader } from "./app-rsc-cache-busting.js";
 import { resolveAppPageSegmentParams } from "./app-page-params.js";
 
 export type AppPageParams = Record<string, string | string[]>;
@@ -239,6 +239,7 @@ export async function renderAppPageBoundaryResponse<TElement>(
       Vary: VINEXT_RSC_VARY_HEADER,
     });
     mergeMiddlewareResponseHeaders(headers, options.middlewareHeaders ?? null);
+    applyRscCompatibilityIdHeader(headers);
 
     return new Response(rscStream, {
       status: options.status,

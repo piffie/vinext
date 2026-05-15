@@ -8,8 +8,12 @@ import {
   scheduleAppPageRscCacheWrite,
 } from "../packages/vinext/src/server/app-page-cache.js";
 import type { ISRCacheEntry } from "../packages/vinext/src/server/isr-cache.js";
-import { VINEXT_RSC_VARY_HEADER } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import {
+  VINEXT_RSC_COMPATIBILITY_ID_HEADER,
+  VINEXT_RSC_VARY_HEADER,
+} from "../packages/vinext/src/server/app-rsc-cache-busting.js";
 import type { CachedAppPageValue } from "../packages/vinext/src/shims/cache.js";
+import { withEnvVar } from "./env-test-helpers.js";
 
 function buildISRCacheEntry(
   value: CachedAppPageValue,
@@ -70,14 +74,17 @@ describe("app page cache helpers", () => {
     expect(htmlResponse?.headers.get("x-vinext-cache")).toBe("HIT");
     await expect(htmlResponse?.text()).resolves.toBe("<h1>cached</h1>");
 
-    const rscResponse = buildAppPageCachedResponse(cachedValue, {
-      cacheState: "STALE",
-      expireSeconds: 300,
-      isRscRequest: true,
-      revalidateSeconds: 60,
-    });
+    const rscResponse = withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "compat-a", () =>
+      buildAppPageCachedResponse(cachedValue, {
+        cacheState: "STALE",
+        expireSeconds: 300,
+        isRscRequest: true,
+        revalidateSeconds: 60,
+      }),
+    );
     expect(rscResponse?.headers.get("content-type")).toBe("text/x-component; charset=utf-8");
     expect(rscResponse?.headers.get("cache-control")).toBe("s-maxage=0, stale-while-revalidate");
+    expect(rscResponse?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
     expect(await rscResponse?.arrayBuffer()).toEqual(rscData);
   });
 
@@ -109,17 +116,21 @@ describe("app page cache helpers", () => {
     const rscData = new TextEncoder().encode("flight").buffer;
     const middlewareHeaders = new Headers({
       "Access-Control-Allow-Origin": "https://example.com",
+      [VINEXT_RSC_COMPATIBILITY_ID_HEADER]: "middleware-compat",
       Vary: "Origin",
     });
 
-    const response = buildAppPageCachedResponse(buildCachedAppPageValue("", rscData), {
-      cacheState: "STALE",
-      isRscRequest: true,
-      middlewareHeaders,
-      revalidateSeconds: 60,
-    });
+    const response = withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "framework-compat", () =>
+      buildAppPageCachedResponse(buildCachedAppPageValue("", rscData), {
+        cacheState: "STALE",
+        isRscRequest: true,
+        middlewareHeaders,
+        revalidateSeconds: 60,
+      }),
+    );
 
     expect(response?.headers.get("Access-Control-Allow-Origin")).toBe("https://example.com");
+    expect(response?.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("framework-compat");
     expect(response?.headers.get("Vary")).toBe(`${VINEXT_RSC_VARY_HEADER}, Origin`);
     expect(response?.headers.get("X-Vinext-Cache")).toBe("STALE");
     await expect(response?.arrayBuffer()).resolves.toEqual(rscData);

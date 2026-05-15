@@ -16,6 +16,7 @@ import {
   appRouterInstance,
   commitClientNavigationState,
   consumePrefetchResponse,
+  createCachedRscResponseSnapshot,
   createClientNavigationRenderSnapshot,
   getCurrentNextUrl,
   getCurrentInterceptionContext,
@@ -87,8 +88,12 @@ import {
 import {
   createRscRequestHeaders,
   createRscRequestUrl,
+  getVinextRscCompatibilityId,
+  resolveHardNavigationTargetFromRscResponse,
+  resolveRscCompatibilityNavigationDecision,
   stripRscCacheBustingSearchParam,
   stripRscSuffix,
+  VINEXT_RSC_COMPATIBILITY_ID_HEADER,
   VINEXT_RSC_CONTENT_TYPE,
 } from "./app-rsc-cache-busting.js";
 import { APP_RSC_RENDER_MODE_REFRESH_PRESERVE_UI } from "./app-rsc-render-mode.js";
@@ -136,6 +141,7 @@ type VisitedResponseCacheEntry = {
 const MAX_VISITED_RESPONSE_CACHE_SIZE = 50;
 const VISITED_RESPONSE_CACHE_TTL = 5 * 60_000;
 const MAX_TRAVERSAL_CACHE_TTL = 30 * 60_000;
+const CLIENT_RSC_COMPATIBILITY_ID = getVinextRscCompatibilityId();
 const browserNavigationController = createAppBrowserNavigationController();
 const NavigationCommitSignal = browserNavigationController.NavigationCommitSignal;
 
@@ -850,6 +856,19 @@ function registerServerActionCallback(): void {
       return undefined;
     }
 
+    if (
+      resolveRscCompatibilityNavigationDecision({
+        clientCompatibilityId: CLIENT_RSC_COMPATIBILITY_ID,
+        currentHref: window.location.href,
+        origin: window.location.origin,
+        responseCompatibilityId: fetchResponse.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER),
+        responseUrl: fetchResponse.url,
+      }).kind === "hard-navigate"
+    ) {
+      window.location.reload();
+      return undefined;
+    }
+
     const result = await createFromFetch<ServerActionResult | AppWireElements>(
       Promise.resolve(fetchResponse),
       { temporaryReferences },
@@ -1024,6 +1043,17 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
           navigationKind,
         );
         if (cachedRoute) {
+          const compatibilityDecision = resolveRscCompatibilityNavigationDecision({
+            clientCompatibilityId: CLIENT_RSC_COMPATIBILITY_ID,
+            currentHref,
+            origin: window.location.origin,
+            responseCompatibilityId: cachedRoute.response.compatibilityIdHeader,
+            responseUrl: cachedRoute.response.url,
+          });
+          if (compatibilityDecision.kind === "hard-navigate") {
+            window.location.href = compatibilityDecision.hardNavigationTarget;
+            return;
+          }
           // Check stale-navigation before and after createFromFetch. The pre-check
           // avoids wasted parse work; the post-check catches supersessions that
           // occur during the await. createFromFetch on a buffered response is fast
@@ -1111,30 +1141,23 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
         const isRscResponse = navContentType.startsWith("text/x-component");
         if (!navResponse.ok || !isRscResponse || !navResponse.body) {
           const responseUrl = navResponseUrl ?? navResponse.url;
-          let hardNavTarget = currentHref;
-          if (responseUrl) {
-            const parsed = new URL(responseUrl, window.location.origin);
-            stripRscCacheBustingSearchParam(parsed);
-            const origUrl = new URL(currentHref, window.location.origin);
-            let pathname = stripRscSuffix(parsed.pathname);
-            // createRscRequestUrl strips trailing slash before appending .rsc,
-            // so the response URL loses it on the round-trip. Restore it when
-            // the original href had one so sites with trailingSlash:true don't
-            // incur an extra 308 to the canonical form on the error path.
-            if (
-              origUrl.pathname.length > 1 &&
-              origUrl.pathname.endsWith("/") &&
-              !pathname.endsWith("/")
-            ) {
-              pathname += "/";
-            }
-            hardNavTarget = pathname + parsed.search;
-            // Preserve the hash from the user's clicked href — a .rsc response
-            // URL never carries a fragment, so dropping it would silently strip
-            // `/foo#section` down to `/foo`.
-            if (origUrl.hash) hardNavTarget += origUrl.hash;
-          }
-          window.location.href = hardNavTarget;
+          window.location.href = resolveHardNavigationTargetFromRscResponse(
+            responseUrl,
+            currentHref,
+            window.location.origin,
+          );
+          return;
+        }
+
+        const compatibilityDecision = resolveRscCompatibilityNavigationDecision({
+          clientCompatibilityId: CLIENT_RSC_COMPATIBILITY_ID,
+          currentHref,
+          origin: window.location.origin,
+          responseCompatibilityId: navResponse.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER),
+          responseUrl: navResponseUrl ?? navResponse.url,
+        });
+        if (compatibilityDecision.kind === "hard-navigate") {
+          window.location.href = compatibilityDecision.hardNavigationTarget;
           return;
         }
 
@@ -1230,13 +1253,7 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
             requestInterceptionContext,
             metadata.interceptionContext,
           ),
-          {
-            buffer: cacheBuffer,
-            contentType: navResponse.headers.get("content-type") ?? "text/x-component",
-            mountedSlotsHeader: navResponse.headers.get(VINEXT_MOUNTED_SLOTS_HEADER),
-            paramsHeader: navResponse.headers.get(VINEXT_PARAMS_HEADER),
-            url: navResponse.url,
-          },
+          createCachedRscResponseSnapshot(navResponse, cacheBuffer, navResponseUrl),
           navParams,
         );
         return;

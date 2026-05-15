@@ -126,7 +126,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import fs from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import commonjs from "vite-plugin-commonjs";
 
 // Install the process-level peer-disconnect backstop at module load.
@@ -136,6 +136,11 @@ import commonjs from "vite-plugin-commonjs";
 // via env-var gate; bypasses during prerender via fire-time
 // VINEXT_PRERENDER check. See socket-error-backstop.ts.
 installSocketErrorBackstop();
+
+function createRscCompatibilityId(nextConfig: ResolvedNextConfig): string {
+  if (nextConfig.deploymentId) return nextConfig.deploymentId;
+  return randomUUID();
+}
 
 type ASTNode = ReturnType<typeof parseAst>["body"][number]["parent"];
 
@@ -569,6 +574,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   let hasCloudflarePlugin = false;
   let warnedInlineNextConfigOverride = false;
   let hasNitroPlugin = false;
+  let rscCompatibilityId: string | undefined;
 
   // Build-time layout classification manifest, captured in the RSC virtual
   // module's load hook and consumed in generateBundle to patch the generated
@@ -925,6 +931,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           }
           nextConfig = await resolveNextConfig(rawConfig, root);
         }
+        rscCompatibilityId ??= createRscCompatibilityId(nextConfig);
         fileMatcher = createValidFileMatcher(nextConfig.pageExtensions);
         instrumentationPath = findInstrumentationFile(root, fileMatcher);
         instrumentationClientPath = findInstrumentationClientFile(root, fileMatcher);
@@ -986,6 +993,11 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         // Also used to namespace ISR cache keys so old cached entries from a
         // previous deploy are never served by the new one.
         defines["process.env.__VINEXT_BUILD_ID"] = JSON.stringify(nextConfig.buildId);
+        // Public browser-facing identity for App Router RSC compatibility
+        // checks. Prefer Next.js-style deploymentId when configured; otherwise
+        // generate a separate token so RSC headers do not expose
+        // generateBuildId() verbatim.
+        defines["process.env.__VINEXT_RSC_COMPATIBILITY_ID"] = JSON.stringify(rscCompatibilityId);
         // Deployment ID — mirrors Next.js' NEXT_DEPLOYMENT_ID seed for shared
         // "use cache" entries, falling back to build ID when absent.
         defines["process.env.__VINEXT_DEPLOYMENT_ID"] = JSON.stringify(

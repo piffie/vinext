@@ -22,6 +22,7 @@ import {
  * repeated canonicalization redirects.
  */
 export const VINEXT_RSC_CACHE_BUSTING_SEARCH_PARAM = "_rsc";
+export const VINEXT_RSC_COMPATIBILITY_ID_HEADER = "X-Vinext-RSC-Compatibility-Id";
 export const VINEXT_RSC_CONTENT_TYPE = "text/x-component";
 
 // Re-export so existing consumers that import from this module keep working.
@@ -64,6 +65,88 @@ function encodeBase64Url(bytes: Uint8Array): string {
 
 function normalizeHeaderValue(value: string | null): string {
   return value ?? "0";
+}
+
+function normalizeCompatibilityId(value: string | null | undefined): string | null {
+  return value && value.length > 0 ? value : null;
+}
+
+export function getVinextRscCompatibilityId(): string | null {
+  return normalizeCompatibilityId(process.env.__VINEXT_RSC_COMPATIBILITY_ID);
+}
+
+export function applyRscCompatibilityIdHeader(
+  headers: Headers,
+  compatibilityId: string | null | undefined = getVinextRscCompatibilityId(),
+): void {
+  const normalized = normalizeCompatibilityId(compatibilityId);
+  if (normalized) {
+    headers.set(VINEXT_RSC_COMPATIBILITY_ID_HEADER, normalized);
+  } else {
+    headers.delete(VINEXT_RSC_COMPATIBILITY_ID_HEADER);
+  }
+}
+
+export function isRscCompatibilityIdCompatible(
+  responseCompatibilityId: string | null | undefined,
+  clientCompatibilityId: string | null | undefined = getVinextRscCompatibilityId(),
+): boolean {
+  const normalizedResponseCompatibilityId = normalizeCompatibilityId(responseCompatibilityId);
+  const normalizedClientCompatibilityId = normalizeCompatibilityId(clientCompatibilityId);
+  return (
+    normalizedClientCompatibilityId === null ||
+    (normalizedResponseCompatibilityId !== null &&
+      normalizedResponseCompatibilityId === normalizedClientCompatibilityId)
+  );
+}
+
+type RscCompatibilityNavigationDecision =
+  | { kind: "compatible" }
+  | { hardNavigationTarget: string; kind: "hard-navigate" };
+
+export function resolveHardNavigationTargetFromRscResponse(
+  responseUrl: string | null | undefined,
+  currentHref: string,
+  origin: string,
+): string {
+  if (!responseUrl) {
+    return currentHref;
+  }
+
+  const parsed = new URL(responseUrl, origin);
+  stripRscCacheBustingSearchParam(parsed);
+  const origUrl = new URL(currentHref, origin);
+  let pathname = stripRscSuffix(parsed.pathname);
+  if (origUrl.pathname.length > 1 && origUrl.pathname.endsWith("/") && !pathname.endsWith("/")) {
+    pathname += "/";
+  }
+
+  let hardNavigationTarget = pathname + parsed.search;
+  if (origUrl.hash) hardNavigationTarget += origUrl.hash;
+  return hardNavigationTarget;
+}
+
+export function resolveRscCompatibilityNavigationDecision(options: {
+  clientCompatibilityId?: string | null;
+  currentHref: string;
+  origin: string;
+  responseCompatibilityId: string | null | undefined;
+  responseUrl?: string | null;
+}): RscCompatibilityNavigationDecision {
+  if (
+    isRscCompatibilityIdCompatible(options.responseCompatibilityId, options.clientCompatibilityId)
+  ) {
+    return { kind: "compatible" };
+  }
+
+  return {
+    hardNavigationTarget: resolveHardNavigationTargetFromRscResponse(
+      options.responseUrl,
+      options.currentHref,
+      options.origin,
+    ),
+    kind: "hard-navigate",
+  };
 }
 
 function normalizeRenderModeHeaderValue(value: string | null): string | null {

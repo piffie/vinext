@@ -6,7 +6,11 @@ import {
   resolveAppPageHtmlResponsePolicy,
   resolveAppPageRscResponsePolicy,
 } from "../packages/vinext/src/server/app-page-response.js";
-import { VINEXT_RSC_VARY_HEADER } from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import {
+  VINEXT_RSC_COMPATIBILITY_ID_HEADER,
+  VINEXT_RSC_VARY_HEADER,
+} from "../packages/vinext/src/server/app-rsc-cache-busting.js";
+import { withEnvVar } from "./env-test-helpers.js";
 
 function createBody(text: string): ReadableStream {
   return new ReadableStream({
@@ -381,6 +385,32 @@ describe("app page response helpers", () => {
     expect(response.headers.get("vary")).toBe(VINEXT_RSC_VARY_HEADER);
     expect(response.headers.get("x-vinext-timing")).toBe("10,5,-1");
     await expect(response.text()).resolves.toBe("flight");
+  });
+
+  it("builds RSC responses with the current compatibility ID header", () => {
+    const response = withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "compat-a", () =>
+      buildAppPageRscResponse(createBody("flight"), {
+        middlewareContext: { headers: null, status: null },
+        policy: {},
+      }),
+    );
+
+    expect(response.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("compat-a");
+  });
+
+  it("keeps the framework compatibility ID when middleware sets the internal header", () => {
+    const middlewareHeaders = new Headers({
+      [VINEXT_RSC_COMPATIBILITY_ID_HEADER]: "middleware-compat",
+    });
+
+    const response = withEnvVar("__VINEXT_RSC_COMPATIBILITY_ID", "framework-compat", () =>
+      buildAppPageRscResponse(createBody("flight"), {
+        middlewareContext: { headers: middlewareHeaders, status: null },
+        policy: {},
+      }),
+    );
+
+    expect(response.headers.get(VINEXT_RSC_COMPATIBILITY_ID_HEADER)).toBe("framework-compat");
   });
 
   it("percent-encodes X-Vinext-Params so non-ASCII characters survive the ByteString header constraint (issue #676)", () => {

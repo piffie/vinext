@@ -1379,6 +1379,81 @@ describe("Plugin config", () => {
     }
   });
 
+  it("injects an opaque App Router RSC compatibility ID instead of the raw build ID", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-rsc-compat-id-"));
+    const buildId = "release-2026-05-15";
+
+    await fsp.mkdir(path.join(tmpDir, "pages"), { recursive: true });
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "index.tsx"),
+      `export default function Home() { return <h1>Home</h1>; }`,
+    );
+
+    try {
+      const plugins = vinext({
+        nextConfig: {
+          generateBuildId: () => buildId,
+        },
+      }) as any[];
+      const configPlugin = plugins.find((p) => p.name === "vinext:config");
+      expect(configPlugin).toBeDefined();
+
+      const result = await configPlugin.config(
+        { root: tmpDir, plugins: [] },
+        { command: "build", mode: "production" },
+      );
+      const repeatedResult = await configPlugin.config(
+        { root: tmpDir, plugins: [] },
+        { command: "build", mode: "production" },
+      );
+
+      expect(result.define["process.env.__VINEXT_BUILD_ID"]).toBe(JSON.stringify(buildId));
+      expect(result.define["process.env.__VINEXT_RSC_COMPATIBILITY_ID"]).not.toBe(
+        JSON.stringify(buildId),
+      );
+      expect(JSON.parse(result.define["process.env.__VINEXT_RSC_COMPATIBILITY_ID"])).toMatch(
+        /^[0-9a-f-]{36}$/,
+      );
+      expect(repeatedResult.define["process.env.__VINEXT_RSC_COMPATIBILITY_ID"]).toBe(
+        result.define["process.env.__VINEXT_RSC_COMPATIBILITY_ID"],
+      );
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses deploymentId as the App Router RSC compatibility ID when configured", async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-rsc-deployment-id-"));
+
+    await fsp.mkdir(path.join(tmpDir, "pages"), { recursive: true });
+    await fsp.writeFile(
+      path.join(tmpDir, "pages", "index.tsx"),
+      `export default function Home() { return <h1>Home</h1>; }`,
+    );
+
+    try {
+      const plugins = vinext({
+        nextConfig: {
+          deploymentId: "public-deployment-id",
+          generateBuildId: () => "release-2026-05-15",
+        },
+      }) as any[];
+      const configPlugin = plugins.find((p) => p.name === "vinext:config");
+      expect(configPlugin).toBeDefined();
+
+      const result = await configPlugin.config(
+        { root: tmpDir, plugins: [] },
+        { command: "build", mode: "production" },
+      );
+
+      expect(result.define["process.env.__VINEXT_RSC_COMPATIBILITY_ID"]).toBe(
+        JSON.stringify("public-deployment-id"),
+      );
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("loads .env before evaluating inline function-form nextConfig", async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "vinext-inline-env-"));
     const envKey = "VINEXT_INLINE_NEXT_CONFIG_ENV";

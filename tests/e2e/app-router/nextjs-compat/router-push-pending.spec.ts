@@ -1,11 +1,13 @@
 /**
- * Next.js Compat E2E: router push pending state
+ * Next.js Compat E2E: router pending state
  *
  * Next.js references:
  * - https://github.com/vercel/next.js/blob/canary/test/e2e/use-link-status/index.test.ts
  * - https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/navigation/navigation.test.ts
  * - https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/navigation/navigation.test.ts#L482
  *   (redirect-with-loading: verifies redirect only triggers once and does not flicker)
+ * - https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/app-router-instance.ts
+ * - https://github.com/vercel/next.js/blob/canary/packages/next/src/client/components/use-action-queue.ts
  *
  * The contract we care about here is that a programmatic App Router navigation
  * started inside useTransition should flip isPending immediately and keep it
@@ -17,7 +19,7 @@ import { waitForAppRouterHydration } from "../../helpers";
 
 const BASE = "http://localhost:4174";
 
-test.describe("Next.js compat: router.push pending state (browser)", () => {
+test.describe("Next.js compat: router pending state (browser)", () => {
   test("same-route search param push keeps useTransition pending until commit", async ({
     page,
   }) => {
@@ -135,5 +137,29 @@ test.describe("Next.js compat: router.push pending state (browser)", () => {
 
     // Final state: URL is at destination
     expect(page.url()).toContain("/nextjs-compat/router-push-pending-destination");
+  });
+
+  test("router.refresh keeps useTransition pending until the refreshed route commits", async ({
+    page,
+  }) => {
+    await page.goto(`${BASE}/nextjs-compat/router-refresh-pending`);
+    await waitForAppRouterHydration(page);
+
+    await expect(page.locator("#refresh-pending-state")).toHaveText("idle");
+    const initialStamp = await page.locator("#refresh-server-stamp").textContent();
+    expect(initialStamp).toBeTruthy();
+
+    const clickPromise = page.click("#refresh-current-route", { noWaitAfter: true });
+
+    await expect(page.locator("#refresh-pending-state")).toHaveText("pending", {
+      timeout: 1_000,
+    });
+    await clickPromise;
+    await expect(page.locator("#refresh-server-stamp")).not.toHaveText(initialStamp ?? "", {
+      timeout: 10_000,
+    });
+    await expect(page.locator("#refresh-pending-state")).toHaveText("idle", {
+      timeout: 10_000,
+    });
   });
 });

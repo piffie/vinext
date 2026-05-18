@@ -35,6 +35,7 @@ import {
 } from "../utils/query.js";
 import { matchRoutePattern, routePatternParts } from "../routing/route-pattern.js";
 import { scrollToHashTarget } from "./hash-scroll.js";
+import { setPagesRouterPopStateHandler } from "./pages-router-runtime.js";
 
 /** basePath from next.config.js, injected by the plugin at build time */
 const __basePath: string = process.env.__NEXT_ROUTER_BASEPATH ?? "";
@@ -783,10 +784,11 @@ export function useRouter(): NextRouter {
 function PagesRouterProvider({ children }: { children: ReactNode }): ReactElement {
   const [{ pathname, query, asPath }, setState] = useState(getPathnameAndQuery);
 
-  // Popstate is handled by the module-level listener below so beforePopState()
-  // is consistently enforced regardless of hook consumers. Keep URL snapshot
-  // subscriptions at the provider boundary so many useRouter() calls share one
-  // router state and one vinext:navigate listener.
+  // Popstate is handled by the Pages Router client entry via
+  // installPagesRouterRuntime() so beforePopState() is consistently enforced
+  // regardless of hook consumers. Keep URL snapshot subscriptions at the
+  // provider boundary so many useRouter() calls share one router state and one
+  // vinext:navigate listener.
   useEffect(() => {
     const onNavigate = ((_e: CustomEvent) => {
       setState(getPathnameAndQuery());
@@ -821,62 +823,59 @@ let _beforePopStateCb: BeforePopStateCallback | undefined;
 let _lastPathnameAndSearch =
   typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
 
-// Module-level popstate listener: handles browser back/forward by re-rendering
-// the React root with the page at the new URL. This runs regardless of whether
-// any component calls useRouter().
-if (typeof window !== "undefined") {
-  window.addEventListener("popstate", (e: PopStateEvent) => {
-    const browserUrl = window.location.pathname + window.location.search;
-    const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
+function handlePagesRouterPopState(e: PopStateEvent): void {
+  const browserUrl = window.location.pathname + window.location.search;
+  const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
 
-    // Detect hash-only back/forward: pathname+search unchanged, only hash differs.
-    const isHashOnly = browserUrl === _lastPathnameAndSearch;
+  // Detect hash-only back/forward: pathname+search unchanged, only hash differs.
+  const isHashOnly = browserUrl === _lastPathnameAndSearch;
 
-    // Check beforePopState callback
-    if (_beforePopStateCb !== undefined) {
-      const shouldContinue = (_beforePopStateCb as BeforePopStateCallback)({
-        url: appUrl,
-        as: appUrl,
-        options: { shallow: false },
-      });
-      if (!shouldContinue) return;
-    }
+  // Check beforePopState callback
+  if (_beforePopStateCb !== undefined) {
+    const shouldContinue = _beforePopStateCb({
+      url: appUrl,
+      as: appUrl,
+      options: { shallow: false },
+    });
+    if (!shouldContinue) return;
+  }
 
-    // Update tracker only after beforePopState confirms navigation proceeds.
-    // If beforePopState cancels, the tracker must retain the previous value
-    // so the next popstate compares against the correct baseline.
-    _lastPathnameAndSearch = browserUrl;
+  // Update tracker only after beforePopState confirms navigation proceeds.
+  // If beforePopState cancels, the tracker must retain the previous value
+  // so the next popstate compares against the correct baseline.
+  _lastPathnameAndSearch = browserUrl;
 
-    if (isHashOnly) {
-      // Hash-only back/forward — no page fetch needed
-      const hashUrl = appUrl + window.location.hash;
-      routerEvents.emit("hashChangeStart", hashUrl, { shallow: false });
-      scrollToHashTarget(window.location.hash);
-      routerEvents.emit("hashChangeComplete", hashUrl, { shallow: false });
+  if (isHashOnly) {
+    // Hash-only back/forward — no page fetch needed
+    const hashUrl = appUrl + window.location.hash;
+    routerEvents.emit("hashChangeStart", hashUrl, { shallow: false });
+    scrollToHashTarget(window.location.hash);
+    routerEvents.emit("hashChangeComplete", hashUrl, { shallow: false });
+    dispatchNavigateEvent();
+    return;
+  }
+
+  const fullAppUrl = appUrl + window.location.hash;
+  routerEvents.emit("routeChangeStart", fullAppUrl, { shallow: false });
+  // Note: The browser has already updated window.location by the time popstate
+  // fires, so this is not truly "before" the URL change. In Next.js the popstate
+  // handler calls replaceState to store history metadata — beforeHistoryChange
+  // precedes that call, not the URL change itself. We emit it here for API
+  // compatibility.
+  routerEvents.emit("beforeHistoryChange", fullAppUrl, { shallow: false });
+  void (async () => {
+    const result = await runNavigateClient(browserUrl, fullAppUrl);
+    if (result === "completed") {
+      routerEvents.emit("routeChangeComplete", fullAppUrl, { shallow: false });
+      restoreScrollPosition(e.state);
       dispatchNavigateEvent();
-      return;
     }
-
-    const fullAppUrl = appUrl + window.location.hash;
-    routerEvents.emit("routeChangeStart", fullAppUrl, { shallow: false });
-    // Note: The browser has already updated window.location by the time popstate
-    // fires, so this is not truly "before" the URL change. In Next.js the popstate
-    // handler calls replaceState to store history metadata — beforeHistoryChange
-    // precedes that call, not the URL change itself. We emit it here for API
-    // compatibility.
-    routerEvents.emit("beforeHistoryChange", fullAppUrl, { shallow: false });
-    void (async () => {
-      const result = await runNavigateClient(browserUrl, fullAppUrl);
-      if (result === "completed") {
-        routerEvents.emit("routeChangeComplete", fullAppUrl, { shallow: false });
-        restoreScrollPosition(e.state);
-        dispatchNavigateEvent();
-      }
-      // "cancelled": superseded by a newer navigation, so this popstate no longer wins.
-      // "failed": runNavigateClient already scheduled the hard-navigation fallback.
-    })();
-  });
+    // "cancelled": superseded by a newer navigation, so this popstate no longer wins.
+    // "failed": runNavigateClient already scheduled the hard-navigation fallback.
+  })();
 }
+
+setPagesRouterPopStateHandler(handlePagesRouterPopState);
 
 /**
  * Wrap a React element in a RouterContext.Provider so that

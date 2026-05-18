@@ -10751,6 +10751,54 @@ describe("Pages Router router helpers", () => {
 });
 
 describe("Pages Router concurrent navigation", () => {
+  it("does not install the Pages Router popstate runtime when next/router is imported", async () => {
+    const previousWindow = (globalThis as any).window;
+    const { win } = createNavWindow();
+    win.addEventListener = vi.fn();
+    (globalThis as any).window = win;
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+
+      expect(win.addEventListener).not.toHaveBeenCalledWith("popstate", expect.any(Function));
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
+  it("installPagesRouterRuntime registers the Pages Router popstate handler once", async () => {
+    const previousWindow = (globalThis as any).window;
+    const { win } = createNavWindow();
+    win.addEventListener = vi.fn();
+    (globalThis as any).window = win;
+
+    try {
+      vi.resetModules();
+      await import("../packages/vinext/src/shims/router.js");
+      const { installPagesRouterRuntime } =
+        await import("../packages/vinext/src/shims/pages-router-runtime.js");
+
+      installPagesRouterRuntime();
+      installPagesRouterRuntime();
+
+      expect(win.addEventListener).toHaveBeenCalledTimes(1);
+      expect(win.addEventListener).toHaveBeenCalledWith("popstate", expect.any(Function));
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
+  });
+
   /**
    * Helper: create a mock window suitable for non-shallow Router.push().
    * Returns an object with the window mock plus helpers for controlling
@@ -11371,6 +11419,9 @@ describe("Pages Router concurrent navigation", () => {
     try {
       vi.resetModules();
       await import("../packages/vinext/src/shims/router.js");
+      const { installPagesRouterRuntime } =
+        await import("../packages/vinext/src/shims/pages-router-runtime.js");
+      installPagesRouterRuntime();
 
       const popstateHandler = listeners.get("popstate");
       expect(popstateHandler).toBeDefined();

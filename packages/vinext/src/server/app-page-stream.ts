@@ -2,6 +2,7 @@ import type { AppPageFontPreload } from "./app-page-execution.js";
 import type { ReactFormState } from "react-dom/client";
 import { VINEXT_RSC_VARY_HEADER } from "./app-rsc-cache-busting.js";
 import { mergeMiddlewareResponseHeaders } from "./middleware-response-headers.js";
+import type { RootParams } from "vinext/shims/root-params";
 
 export type AppPageFontData = {
   links: string[];
@@ -24,6 +25,7 @@ export type AppPageSsrHandler = {
       formState?: ReactFormState | null;
       scriptNonce?: string;
       basePath?: string;
+      rootParams?: RootParams;
       sideStream?: ReadableStream<Uint8Array>;
       capturedRscDataRef?: { value: Promise<ArrayBuffer> | null };
       /** When true, wait for the full React tree before emitting bytes. */
@@ -39,6 +41,7 @@ type RenderAppPageHtmlStreamOptions = {
   rscStream: ReadableStream<Uint8Array>;
   scriptNonce?: string;
   basePath?: string;
+  rootParams?: RootParams;
   ssrHandler: AppPageSsrHandler;
   /** Pre-split side stream for fused embed+capture (#981). When set,
    *  handleSsr skips its internal tee and accumulates raw RSC bytes. */
@@ -101,6 +104,7 @@ export async function renderAppPageHtmlStream(
     formState: options.formState ?? null,
     scriptNonce: options.scriptNonce,
     basePath: options.basePath,
+    rootParams: options.rootParams,
     sideStream: options.sideStream,
     capturedRscDataRef: options.capturedRscDataRef,
     waitForAllReady: options.waitForAllReady,

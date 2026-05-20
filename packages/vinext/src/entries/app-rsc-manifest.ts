@@ -222,37 +222,7 @@ function appendStaticParamSource(
   sourcesByPattern.set(pattern, sources);
 }
 
-function buildGenerateStaticParamsEntries(routes: AppRoute[], imports: ImportAllocator): string[] {
-  const sourcesByPattern = new Map<string, string[]>();
-
-  for (const route of routes) {
-    if (!route.isDynamic) continue;
-
-    for (const [index, layoutPath] of route.layouts.entries()) {
-      appendStaticParamSource(
-        sourcesByPattern,
-        createRoutePatternPrefix(route.routeSegments, route.layoutTreePositions[index] ?? 0)
-          ?.pattern ?? null,
-        `${imports.getImportVar(layoutPath)}?.generateStaticParams`,
-      );
-    }
-
-    if (route.pagePath) {
-      appendStaticParamSource(
-        sourcesByPattern,
-        route.pattern,
-        `${imports.getImportVar(route.pagePath)}?.generateStaticParams`,
-      );
-    }
-  }
-
-  return Array.from(sourcesByPattern.entries()).map(
-    ([pattern, sources]) =>
-      `  ${JSON.stringify(pattern)}: __createAppPrerenderStaticParamsResolver([${sources.join(", ")}]),`,
-  );
-}
-
-function buildRootParamNameEntries(routes: AppRoute[]): string[] {
+function buildRootParamNamesByPattern(routes: AppRoute[]): Map<string, string[]> {
   const namesByPattern = new Map<string, string[]>();
 
   function append(
@@ -281,6 +251,46 @@ function buildRootParamNameEntries(routes: AppRoute[]): string[] {
     }
   }
 
+  return namesByPattern;
+}
+
+function buildGenerateStaticParamsEntries(
+  routes: AppRoute[],
+  imports: ImportAllocator,
+  namesByPattern: Map<string, string[]>,
+): string[] {
+  const sourcesByPattern = new Map<string, string[]>();
+
+  for (const route of routes) {
+    if (!route.isDynamic) continue;
+
+    for (const [index, layoutPath] of route.layouts.entries()) {
+      appendStaticParamSource(
+        sourcesByPattern,
+        createRoutePatternPrefix(route.routeSegments, route.layoutTreePositions[index] ?? 0)
+          ?.pattern ?? null,
+        `${imports.getImportVar(layoutPath)}?.generateStaticParams`,
+      );
+    }
+
+    if (route.pagePath) {
+      appendStaticParamSource(
+        sourcesByPattern,
+        route.pattern,
+        `${imports.getImportVar(route.pagePath)}?.generateStaticParams`,
+      );
+    }
+  }
+
+  return Array.from(sourcesByPattern.entries()).map(([pattern, sources]) => {
+    const rootParamNames = namesByPattern.get(pattern) ?? [];
+    return `  ${JSON.stringify(pattern)}: __createAppPrerenderStaticParamsResolver([${sources.join(
+      ", ",
+    )}], ${JSON.stringify(rootParamNames)}),`;
+  });
+}
+
+function buildRootParamNameEntries(namesByPattern: Map<string, string[]>): string[] {
   return Array.from(namesByPattern.entries()).map(
     ([pattern, names]) => `  ${JSON.stringify(pattern)}: ${JSON.stringify(names)},`,
   );
@@ -318,12 +328,18 @@ export function buildAppRscManifestCode(
     imports.getImportVar(route.filePath);
   }
 
+  const namesByPattern = buildRootParamNamesByPattern(options.routes);
+
   return {
     imports: imports.imports,
     routeEntries,
     metaRouteEntries: createMetadataRouteEntriesSource(metadataRoutes, imports.importMap),
-    generateStaticParamsEntries: buildGenerateStaticParamsEntries(options.routes, imports),
-    rootParamNameEntries: buildRootParamNameEntries(options.routes),
+    generateStaticParamsEntries: buildGenerateStaticParamsEntries(
+      options.routes,
+      imports,
+      namesByPattern,
+    ),
+    rootParamNameEntries: buildRootParamNameEntries(namesByPattern),
     rootNotFoundVar,
     rootForbiddenVar,
     rootUnauthorizedVar,

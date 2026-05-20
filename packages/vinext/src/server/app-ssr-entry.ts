@@ -17,6 +17,7 @@ import {
   useServerInsertedHTML,
 } from "vinext/shims/navigation";
 import { runWithNavigationContext } from "vinext/shims/navigation-state";
+import { runWithRootParamsScope, type RootParams } from "vinext/shims/root-params";
 import { isOpenRedirectShaped } from "./request-pipeline.js";
 import { notFoundResponse } from "./http-error-responses.js";
 import { withScriptNonce } from "vinext/shims/script-nonce-context";
@@ -191,6 +192,7 @@ export async function handleSsr(
     capturedRscDataRef?: { value: Promise<ArrayBuffer> | null };
     formState?: ReactFormState | null;
     basePath?: string;
+    rootParams?: RootParams;
     /** When true, wait for the full React tree (including Suspense boundaries)
      *  to resolve before returning the HTML stream. Used for static prerender
      *  and ISR cache writes to avoid caching fallback content. */
@@ -211,150 +213,155 @@ export async function handleSsr(
       clearServerInsertedHTML();
     };
 
-    try {
-      // Fused tee path (#981): caller pre-split the stream. No internal tee needed.
-      // sideStream carries both the embed transform and raw byte accumulation.
-      // rscStream is used directly for createFromReadableStream (SSR).
-      let ssrStream: ReadableStream<Uint8Array>;
-      let rscEmbed;
+    const rootParams = options?.rootParams ?? {};
+    return runWithRootParamsScope(rootParams, async () => {
+      try {
+        // Fused tee path (#981): caller pre-split the stream. No internal tee needed.
+        // sideStream carries both the embed transform and raw byte accumulation.
+        // rscStream is used directly for createFromReadableStream (SSR).
+        let ssrStream: ReadableStream<Uint8Array>;
+        let rscEmbed;
 
-      if (options?.sideStream) {
-        ssrStream = rscStream;
-        rscEmbed = createRscEmbedTransform(options.sideStream, options?.scriptNonce);
-        if (options.capturedRscDataRef) {
-          options.capturedRscDataRef.value = rscEmbed.getRawBuffer();
+        if (options?.sideStream) {
+          ssrStream = rscStream;
+          rscEmbed = createRscEmbedTransform(options.sideStream, options?.scriptNonce);
+          if (options.capturedRscDataRef) {
+            options.capturedRscDataRef.value = rscEmbed.getRawBuffer();
+          }
+        } else {
+          const [s1, s2] = rscStream.tee();
+          ssrStream = s1;
+          rscEmbed = createRscEmbedTransform(s2, options?.scriptNonce);
         }
-      } else {
-        const [s1, s2] = rscStream.tee();
-        ssrStream = s1;
-        rscEmbed = createRscEmbedTransform(s2, options?.scriptNonce);
-      }
 
-      let flightRoot: PromiseLike<AppWireElements> | null = null;
+        let flightRoot: PromiseLike<AppWireElements> | null = null;
 
-      function VinextFlightRoot(): ReactNode {
-        if (!flightRoot) {
-          flightRoot = createFromReadableStream<AppWireElements>(ssrStream);
+        function VinextFlightRoot(): ReactNode {
+          if (!flightRoot) {
+            flightRoot = createFromReadableStream<AppWireElements>(ssrStream);
+          }
+          const wireElements = use(flightRoot);
+          const elements = AppElementsWire.decode(wireElements);
+          const metadata = AppElementsWire.readMetadata(elements);
+          return createReactElement(
+            ElementsContext.Provider,
+            { value: elements },
+            createReactElement(Slot, { id: metadata.routeId }),
+          );
         }
-        const wireElements = use(flightRoot);
-        const elements = AppElementsWire.decode(wireElements);
-        const metadata = AppElementsWire.readMetadata(elements);
-        return createReactElement(
-          ElementsContext.Provider,
-          { value: elements },
-          createReactElement(Slot, { id: metadata.routeId }),
-        );
-      }
 
-      const flightRootElement = createReactElement(VinextFlightRoot);
-      const root = AppRouterContext
-        ? createReactElement(
-            AppRouterContext.Provider,
-            { value: appRouterInstance },
-            flightRootElement,
-          )
-        : flightRootElement;
-      const ssrTree = ServerInsertedHTMLContext
-        ? createReactElement(
-            ServerInsertedHTMLContext.Provider,
-            { value: useServerInsertedHTML },
-            root,
-          )
-        : root;
-      const ssrRoot = withScriptNonce(ssrTree, options?.scriptNonce);
+        const flightRootElement = createReactElement(VinextFlightRoot);
+        const root = AppRouterContext
+          ? createReactElement(
+              AppRouterContext.Provider,
+              { value: appRouterInstance },
+              flightRootElement,
+            )
+          : flightRootElement;
+        const ssrTree = ServerInsertedHTMLContext
+          ? createReactElement(
+              ServerInsertedHTMLContext.Provider,
+              { value: useServerInsertedHTML },
+              root,
+            )
+          : root;
+        const ssrRoot = withScriptNonce(ssrTree, options?.scriptNonce);
 
-      // plugin-rsc returns the bootstrap as `import("<url>")` so callers can
-      // inject it via `bootstrapScriptContent`. We hand the URL to React's
-      // `bootstrapModules` option instead so the streamed HTML contains a
-      // real `<script type="module" src="<url>">` tag — exposing the URL
-      // to anything that inspects `script.attribs.src` (e.g. the Next.js
-      // asset-prefix fixture test "bundles should return 200 on served
-      // assetPrefix"). Mirrors Next.js's app-render path which passes
-      // `bootstrapScripts: [{ src }]` for the same reason; we use
-      // `bootstrapModules` because vinext's chunks are native ES modules
-      // (Vite output) so a `type="module"` tag is the correct loader.
-      //
-      // In dev, `<url>` is a Vite dev URL like
-      // `/@id/__x00__virtual:vinext-app-browser-entry`; the browser fetches
-      // it as a module from the dev server. In prod it's the hashed bundle
-      // URL (e.g. `/_next/static/index-abc123.js`, optionally prefixed by
-      // `assetPrefix`). Both are valid `<script type="module" src=…>` targets.
-      const bootstrapScriptContent = await import.meta.viteRsc.loadBootstrapScriptContent("index");
-      const bootstrapModuleUrl = extractBootstrapModuleUrl(bootstrapScriptContent);
-      const errorMetaRenderer = createSsrErrorMetaRenderer({
-        basePath: options?.basePath,
-      });
-
-      const htmlStream = await renderToReadableStream(ssrRoot, {
-        // `bootstrapScriptContent` was previously how vinext injected the
-        // dynamic-import call. `bootstrapModules` performs the same work
-        // natively (and exposes the URL in the DOM), so passing both would
-        // load the bootstrap module twice.
+        // plugin-rsc returns the bootstrap as `import("<url>")` so callers can
+        // inject it via `bootstrapScriptContent`. We hand the URL to React's
+        // `bootstrapModules` option instead so the streamed HTML contains a
+        // real `<script type="module" src="<url>">` tag — exposing the URL
+        // to anything that inspects `script.attribs.src` (e.g. the Next.js
+        // asset-prefix fixture test "bundles should return 200 on served
+        // assetPrefix"). Mirrors Next.js's app-render path which passes
+        // `bootstrapScripts: [{ src }]` for the same reason; we use
+        // `bootstrapModules` because vinext's chunks are native ES modules
+        // (Vite output) so a `type="module"` tag is the correct loader.
         //
-        // CSP implications of using `bootstrapModules` instead of inline
-        // `bootstrapScriptContent`:
-        //  - Apps no longer need `script-src 'unsafe-inline'` to load the
-        //    bootstrap (improvement — inline imports required `'unsafe-inline'`).
-        //  - Apps that restrict script sources need `'self'` for the
-        //    common case, or the CDN origin when `assetPrefix` is an
-        //    absolute URL like `https://cdn.example.com`.
-        //  - React still applies `nonce` to the emitted
-        //    `<script type="module" src=…>` tag, so nonce-based CSP
-        //    (`script-src 'nonce-…' 'strict-dynamic'`) keeps working.
-        bootstrapModules: bootstrapModuleUrl ? [bootstrapModuleUrl] : undefined,
-        formState: options?.formState ?? null,
-        nonce: options?.scriptNonce,
-        onError(error) {
-          errorMetaRenderer.capture(error);
-
-          if (error && typeof error === "object" && "digest" in error) {
-            return String(error.digest);
-          }
-
-          if (process.env.NODE_ENV === "production" && error) {
-            const message = getErrorMessage(error);
-            const stack = error instanceof Error ? (error.stack ?? "") : "";
-            return ssrErrorDigest(message + stack);
-          }
-
-          return undefined;
-        },
-      });
-
-      // When producing static output (prerender / ISR cache writes), wait for
-      // the full React tree to resolve before emitting bytes. This prevents
-      // Suspense fallback content from being serialized to the cache.
-      // Matches Next.js waitForAllReady forkpoint in renderToNodeFizzStream.
-      if (options?.waitForAllReady === true) {
-        await htmlStream.allReady;
-      }
-
-      const fontHTML = renderFontHtml(fontData, options?.scriptNonce);
-      let didInjectHeadHTML = false;
-      const getInsertedHTML = (): string => {
-        const insertedHTML = renderInsertedHtml(renderServerInsertedHTML());
-        const errorMetaHTML = errorMetaRenderer.flush();
-        if (didInjectHeadHTML) return insertedHTML + errorMetaHTML;
-
-        didInjectHeadHTML = true;
-        return buildHeadInjectionHtml(
-          navContext,
-          bootstrapModuleUrl,
-          options?.formState ?? null,
-          insertedHTML + errorMetaHTML,
-          fontHTML,
-          options?.scriptNonce,
+        // In dev, `<url>` is a Vite dev URL like
+        // `/@id/__x00__virtual:vinext-app-browser-entry`; the browser fetches
+        // it as a module from the dev server. In prod it's the hashed bundle
+        // URL (e.g. `/_next/static/index-abc123.js`, optionally prefixed by
+        // `assetPrefix`). Both are valid `<script type="module" src=…>` targets.
+        const bootstrapScriptContent = await import.meta.viteRsc.loadBootstrapScriptContent(
+          "index",
         );
-      };
+        const bootstrapModuleUrl = extractBootstrapModuleUrl(bootstrapScriptContent);
+        const errorMetaRenderer = createSsrErrorMetaRenderer({
+          basePath: options?.basePath,
+        });
 
-      return deferUntilStreamConsumed(
-        htmlStream.pipeThrough(createTickBufferedTransform(rscEmbed, getInsertedHTML)),
-        cleanup,
-      );
-    } catch (error) {
-      cleanup();
-      throw error;
-    }
+        const htmlStream = await renderToReadableStream(ssrRoot, {
+          // `bootstrapScriptContent` was previously how vinext injected the
+          // dynamic-import call. `bootstrapModules` performs the same work
+          // natively (and exposes the URL in the DOM), so passing both would
+          // load the bootstrap module twice.
+          //
+          // CSP implications of using `bootstrapModules` instead of inline
+          // `bootstrapScriptContent`:
+          //  - Apps no longer need `script-src 'unsafe-inline'` to load the
+          //    bootstrap (improvement — inline imports required `'unsafe-inline'`).
+          //  - Apps that restrict script sources need `'self'` for the
+          //    common case, or the CDN origin when `assetPrefix` is an
+          //    absolute URL like `https://cdn.example.com`.
+          //  - React still applies `nonce` to the emitted
+          //    `<script type="module" src=…>` tag, so nonce-based CSP
+          //    (`script-src 'nonce-…' 'strict-dynamic'`) keeps working.
+          bootstrapModules: bootstrapModuleUrl ? [bootstrapModuleUrl] : undefined,
+          formState: options?.formState ?? null,
+          nonce: options?.scriptNonce,
+          onError(error) {
+            errorMetaRenderer.capture(error);
+
+            if (error && typeof error === "object" && "digest" in error) {
+              return String(error.digest);
+            }
+
+            if (process.env.NODE_ENV === "production" && error) {
+              const message = getErrorMessage(error);
+              const stack = error instanceof Error ? (error.stack ?? "") : "";
+              return ssrErrorDigest(message + stack);
+            }
+
+            return undefined;
+          },
+        });
+
+        // When producing static output (prerender / ISR cache writes), wait for
+        // the full React tree to resolve before emitting bytes. This prevents
+        // Suspense fallback content from being serialized to the cache.
+        // Matches Next.js waitForAllReady forkpoint in renderToNodeFizzStream.
+        if (options?.waitForAllReady === true) {
+          await htmlStream.allReady;
+        }
+
+        const fontHTML = renderFontHtml(fontData, options?.scriptNonce);
+        let didInjectHeadHTML = false;
+        const getInsertedHTML = (): string => {
+          const insertedHTML = renderInsertedHtml(renderServerInsertedHTML());
+          const errorMetaHTML = errorMetaRenderer.flush();
+          if (didInjectHeadHTML) return insertedHTML + errorMetaHTML;
+
+          didInjectHeadHTML = true;
+          return buildHeadInjectionHtml(
+            navContext,
+            bootstrapModuleUrl,
+            options?.formState ?? null,
+            insertedHTML + errorMetaHTML,
+            fontHTML,
+            options?.scriptNonce,
+          );
+        };
+
+        return deferUntilStreamConsumed(
+          htmlStream.pipeThrough(createTickBufferedTransform(rscEmbed, getInsertedHTML)),
+          cleanup,
+        );
+      } catch (error) {
+        cleanup();
+        throw error;
+      }
+    });
   }) as Promise<ReadableStream<Uint8Array>>;
 }
 

@@ -25,7 +25,7 @@ import {
   getRequestExecutionContext,
   type ExecutionContextLike,
 } from "vinext/shims/request-context";
-import { pickRootParams, setRootParams } from "vinext/shims/root-params";
+import { pickRootParams, setRootParams, type RootParams } from "vinext/shims/root-params";
 import { createRequestContext, runWithRequestContext } from "vinext/shims/unified-request-context";
 import { flattenErrorCauses } from "../utils/error-cause.js";
 import { hasBasePath } from "../utils/base-path.js";
@@ -94,6 +94,7 @@ type DispatchMatchedPageOptions<TRoute> = {
   middlewareContext: AppRscMiddlewareContext;
   mountedSlotsHeader: string | null;
   params: AppPageParams;
+  rootParams?: RootParams;
   request: Request;
   route: TRoute;
   scriptNonce?: string;
@@ -522,7 +523,8 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     searchParams: url.searchParams,
     params,
   });
-  setRootParams(pickRootParams(params, route.rootParamNames));
+  const rootParams = pickRootParams(params, route.rootParamNames);
+  setRootParams(rootParams);
 
   if (route.routeHandler) {
     setCurrentFetchSoftTags(
@@ -550,6 +552,7 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     middlewareContext,
     mountedSlotsHeader,
     params,
+    rootParams,
     request,
     route,
     scriptNonce,

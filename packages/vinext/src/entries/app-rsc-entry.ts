@@ -497,6 +497,7 @@ export default __createAppRscHandler({
     middlewareContext,
     mountedSlotsHeader,
     params,
+    rootParams,
     request,
     route,
     scriptNonce,
@@ -572,6 +573,7 @@ export default __createAppRscHandler({
       middlewareContext,
       mountedSlotsHeader,
       params,
+      rootParams,
       probeLayoutAt(li) {
         const LayoutComp = route.layouts[li]?.default;
         if (!LayoutComp) return null;

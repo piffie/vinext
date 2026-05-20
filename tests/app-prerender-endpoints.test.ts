@@ -36,6 +36,43 @@ describe("App prerender endpoint helpers", () => {
     });
   });
 
+  it("filters non-root params from root param scope in resolver while preserving them in params argument", async () => {
+    const layoutGenerateStaticParams = vi.fn(() => [{ lang: "en", locale: "us" }]);
+    const pageGenerateStaticParams = vi.fn(async ({ params }) => {
+      const rootLang = await getRootParam("lang");
+      const rootLocale = await getRootParam("locale");
+      return [{ rootLang, rootLocale, slug: `${params.lang}-post` }];
+    });
+    const resolveStaticParams = createAppPrerenderStaticParamsResolver(
+      [layoutGenerateStaticParams, pageGenerateStaticParams],
+      ["lang"],
+    );
+
+    await expect(resolveStaticParams?.({ params: {} })).resolves.toEqual([
+      { lang: "en", locale: "us", rootLang: "en", rootLocale: undefined, slug: "en-post" },
+    ]);
+    expect(pageGenerateStaticParams).toHaveBeenCalledWith({
+      params: { lang: "en", locale: "us" },
+    });
+  });
+
+  it("preserves incoming non-root parent params in the resolver", async () => {
+    const first = vi.fn(async ({ params }) => {
+      expect(params).toEqual({ lang: "en", category: "docs" });
+      expect(await getRootParam("lang")).toBe("en");
+      expect(await getRootParam("category")).toBeUndefined();
+      return [{ slug: `${params.category}-post` }];
+    });
+
+    const second = vi.fn(({ params }) => [{ final: params.slug }]);
+
+    const resolve = createAppPrerenderStaticParamsResolver([first, second], ["lang"]);
+
+    await expect(resolve?.({ params: { lang: "en", category: "docs" } })).resolves.toEqual([
+      { lang: "en", category: "docs", slug: "docs-post", final: "docs-post" },
+    ]);
+  });
+
   it("bails out of composed generateStaticParams when a source returns a non-array", async () => {
     const malformedLayoutGenerateStaticParams = vi.fn(() => undefined);
     const pageGenerateStaticParams = vi.fn(() => [{ slug: "unused" }]);

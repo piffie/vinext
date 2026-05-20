@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { ReactFormState } from "react-dom/client";
 import type { CachedAppPageValue } from "vinext/shims/cache";
+import type { RootParams } from "vinext/shims/root-params";
 import { runWithFetchDedupe } from "vinext/shims/fetch-cache";
 import { AppElementsWire, isAppElementsRecord, type AppOutgoingElements } from "./app-elements.js";
 import { hasDigest } from "./app-rsc-errors.js";
@@ -107,6 +108,7 @@ type RenderAppPageLifecycleOptions = {
   loadSsrHandler: () => Promise<AppPageSsrHandler>;
   middlewareContext: AppPageMiddlewareContext;
   params: Record<string, unknown>;
+  rootParams?: RootParams;
   peekRenderObservationState?: () => AppPageRenderObservationState;
   probeLayoutAt: (layoutIndex: number) => unknown;
   probePage: () => unknown;
@@ -505,6 +507,7 @@ export async function renderAppPageLifecycle(
         fontData,
         navigationContext: options.getNavigationContext(),
         basePath: options.basePath,
+        rootParams: options.rootParams,
         formState: options.formState ?? null,
         rscStream: rscForResponse,
         scriptNonce: options.scriptNonce,

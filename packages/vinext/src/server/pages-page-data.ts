@@ -81,6 +81,18 @@ export type PagesPageModule = {
     locale?: string;
     locales?: string[];
     defaultLocale?: string;
+    /**
+     * Indicates why `getStaticProps` was invoked.
+     *
+     * - `"build"`: initial build-time prerender (before runtime traffic).
+     * - `"on-demand"`: triggered by `res.revalidate()` from an API route.
+     * - `"stale"`: stale-while-revalidate background regeneration.
+     *
+     * Mirrors Next.js `render.tsx`'s `revalidateReason` on the
+     * `GetStaticPropsContext` type — see
+     * `.nextjs-ref/packages/next/src/types.ts`.
+     */
+    revalidateReason?: "build" | "on-demand" | "stale";
   }) => Promise<PagesPagePropsResult> | PagesPagePropsResult;
 };
 
@@ -122,6 +134,30 @@ export type ResolvePagesPageDataOptions = {
     expireSeconds?: number,
   ) => Promise<void>;
   expireSeconds?: number;
+  /**
+   * When true, this dispatch corresponds to a build-time prerender (the
+   * `vinext` build phase fetches each statically generated page through the
+   * production server). Maps to `revalidateReason: "build"` when
+   * `getStaticProps` is invoked. Mirrors Next.js's
+   * `renderOpts.isBuildTimePrerendering` flag — see
+   * `.nextjs-ref/packages/next/src/server/render.tsx`.
+   */
+  isBuildTimePrerendering?: boolean;
+  /**
+   * When true, this dispatch was triggered by an on-demand revalidation
+   * request (e.g. `res.revalidate()` in a Pages Router API route, or an
+   * equivalent webhook). Maps to `revalidateReason: "on-demand"` when
+   * `getStaticProps` is invoked. Mirrors Next.js's
+   * `renderOpts.isOnDemandRevalidate` flag — see
+   * `.nextjs-ref/packages/next/src/server/render.tsx`.
+   *
+   * Forward-looking plumbing: no caller currently sets this — `res.revalidate()`
+   * is not yet implemented in vinext. The `"on-demand"` branch in the
+   * `revalidateReason` resolver is intentionally unreachable today; keeping the
+   * typed contract here means wiring it up will be a one-line change once the
+   * trigger lands.
+   */
+  isOnDemandRevalidate?: boolean;
   pageModule: PagesPageModule;
   params: Record<string, unknown>;
   query: Record<string, unknown>;
@@ -459,6 +495,11 @@ export async function resolvePagesPageData(
               locale: options.i18n.locale,
               locales: options.i18n.locales,
               defaultLocale: options.i18n.defaultLocale,
+              // Background regeneration for an entry that is already in the
+              // cache is always a stale-while-revalidate refresh — mirrors
+              // Next.js `render.tsx` (`isBuildTimeSSG ? "build" : "stale"`,
+              // and we're not at build time here).
+              revalidateReason: "stale",
             });
 
             if (
@@ -514,6 +555,17 @@ export async function resolvePagesPageData(
       locale: options.i18n.locale,
       locales: options.i18n.locales,
       defaultLocale: options.i18n.defaultLocale,
+      // Maps Next.js's resolution in `render.tsx`:
+      //   isOnDemandRevalidate ? "on-demand"
+      //     : isBuildTimeSSG    ? "build"
+      //                         : "stale"
+      // We pick "stale" as the default at runtime so existing-but-missing
+      // (cache evicted) entries surface as a regeneration rather than a build.
+      revalidateReason: options.isOnDemandRevalidate
+        ? "on-demand"
+        : options.isBuildTimePrerendering
+          ? "build"
+          : "stale",
     });
 
     if (result?.props) {

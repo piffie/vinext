@@ -17,7 +17,6 @@ import type {
 } from "../packages/vinext/src/shims/cache.js";
 
 const FIXTURE_DIR = PAGES_FIXTURE_DIR;
-
 describe("vinext next data client helpers", () => {
   it("extracts __NEXT_DATA__ after carriage-return whitespace", () => {
     const json = '{"props":{},"page":"/","query":{}}';
@@ -2415,13 +2414,14 @@ describe("next/headers shim", () => {
   });
 
   it("throws when called outside request context", async () => {
-    const { headers, cookies } = await import("../packages/vinext/src/shims/headers.js");
+    const { headers, cookies, draftMode } = await import("../packages/vinext/src/shims/headers.js");
     // Ensure context is cleared
     const { setHeadersContext } = await import("../packages/vinext/src/shims/headers.js");
     setHeadersContext(null);
 
     await expect(headers()).rejects.toThrow("Server Component");
     await expect(cookies()).rejects.toThrow("Server Component");
+    await expect(draftMode()).rejects.toThrow("draftMode() can only be called");
   });
 
   it("legacy sync access still throws the request-context error outside request context", async () => {
@@ -2457,6 +2457,36 @@ describe("next/headers shim", () => {
     const dm = await draftMode();
     expect(dm.isEnabled).toBe(false);
     setHeadersContext(null);
+  });
+
+  it("draft mode validation is scoped to the request context secret", async () => {
+    const { draftMode, headersContextFromRequest, isDraftModeRequest, runWithHeadersContext } =
+      await import("../packages/vinext/src/shims/headers.js");
+
+    const firstContext = headersContextFromRequest(new Request("https://example.test/one"), {
+      draftModeSecret: "first-secret",
+    });
+    const secondContext = headersContextFromRequest(new Request("https://example.test/two"), {
+      draftModeSecret: "second-secret",
+    });
+
+    await runWithHeadersContext(firstContext, async () => {
+      const dm = await draftMode();
+      dm.enable();
+      expect(dm.isEnabled).toBe(true);
+    });
+
+    await runWithHeadersContext(secondContext, async () => {
+      const dm = await draftMode();
+      dm.enable();
+      expect(dm.isEnabled).toBe(true);
+    });
+
+    const firstCookieRequest = new Request("https://example.test/one", {
+      headers: { Cookie: "__prerender_bypass=first-secret" },
+    });
+    expect(isDraftModeRequest(firstCookieRequest, "first-secret")).toBe(true);
+    expect(isDraftModeRequest(firstCookieRequest, "second-secret")).toBe(false);
   });
 
   it("draftMode().enable() sets the bypass cookie in context", async () => {
@@ -2516,6 +2546,24 @@ describe("next/headers shim", () => {
     expect(cookieHeader).toContain("Expires=Thu, 01 Jan 1970 00:00:00 GMT");
     expect(cookieHeader).not.toContain("Max-Age=0");
     setHeadersContext(null);
+  });
+
+  it("draftMode().disable() throws after its request context has been cleared", async () => {
+    const { setHeadersContext, draftMode, getDraftModeCookieHeader } =
+      await import("../packages/vinext/src/shims/headers.js");
+
+    setHeadersContext({
+      headers: new Headers(),
+      cookies: new Map([["__prerender_bypass", "draft-secret"]]),
+      draftModeSecret: "draft-secret",
+    });
+    const dm = await draftMode();
+    expect(dm.isEnabled).toBe(true);
+
+    setHeadersContext(null);
+
+    expect(() => dm.disable()).toThrow("draftMode().disable() can only be called");
+    expect(getDraftModeCookieHeader()).toBeNull();
   });
 
   it('draftMode() throws the dynamic = "error" access error before exposing draft controls', async () => {

@@ -7,6 +7,7 @@
  *
  * Previously housed in server/app-dev-server.ts.
  */
+import { randomUUID } from "node:crypto";
 import { buildAppRscManifestCode } from "./app-rsc-manifest.js";
 import { resolveEntryPath, normalizePathSeparators } from "./runtime-entry-module.js";
 import type {
@@ -143,6 +144,8 @@ type AppRouterConfig = {
   hasPagesDir?: boolean;
   /** Exact public/ file routes, using normalized leading-slash pathnames. */
   publicFiles?: string[];
+  /** Server-only token used to validate the draft-mode bypass cookie. */
+  draftModeSecret?: string;
 };
 
 /**
@@ -176,6 +179,7 @@ export function generateRscEntry(
   const i18nConfig = config?.i18n ?? null;
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
+  const draftModeSecret = config?.draftModeSecret ?? randomUUID();
   const manifestCode = buildAppRscManifestCode({
     routes,
     metadataRoutes,
@@ -306,6 +310,8 @@ import { suppressHookWarningAls } from ${JSON.stringify(appHookWarningSuppressio
 import { clearAppRequestContext as __clearRequestContext, setAppNavigationContext as setNavigationContext } from ${JSON.stringify(appRequestContextPath)};
 import { createAppPrerenderStaticParamsResolver as __createAppPrerenderStaticParamsResolver } from ${JSON.stringify(appPrerenderStaticParamsPath)};
 import { seedMemoryCacheFromPrerender as __seedMemoryCacheFromPrerender } from ${JSON.stringify(seedCachePath)};
+
+const __draftModeSecret = ${JSON.stringify(draftModeSecret)};
 
 // Note: cache entries are written with \`headers: undefined\`. Next.js stores
 // response headers (e.g. set-cookie from cookies().set() during render) in the
@@ -517,6 +523,7 @@ export default __createAppRscHandler({
   configHeaders: __configHeaders,
   configRedirects: __configRedirects,
   configRewrites: __configRewrites,
+  draftModeSecret: __draftModeSecret,
   dispatchMatchedPage({
     cleanPathname,
     formState,
@@ -568,6 +575,7 @@ export default __createAppRscHandler({
         return createRscOnErrorHandler(request, pathname, routePath);
       },
       debugClassification: __classDebug,
+      draftModeSecret: __draftModeSecret,
       dynamicConfig: __segmentConfig.dynamicConfig,
       dynamicParamsConfig: __segmentConfig.dynamicParamsConfig,
       fetchCache: __segmentConfig.fetchCache ?? null,
@@ -668,6 +676,7 @@ export default __createAppRscHandler({
       clearRequestContext() {
         __clearRequestContext();
       },
+      draftModeSecret: __draftModeSecret,
       i18n: __i18nConfig,
       isrDebug: __isrDebug,
       isrGet: __isrGet,

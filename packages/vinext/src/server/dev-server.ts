@@ -49,7 +49,11 @@ import {
 import { buildDefaultPagesNotFoundResponse } from "./pages-default-404.js";
 import { resolvePagesPageMethodResponse } from "./pages-page-method.js";
 import { isSerializableProps } from "./pages-serializable-props.js";
-import { loadUserDocumentInitialProps } from "./pages-document-initial-props.js";
+import {
+  loadUserDocumentInitialProps,
+  type RenderPageEnhancers,
+  runDocumentRenderPage,
+} from "./pages-document-initial-props.js";
 import { callDocumentGetInitialProps } from "./document-initial-head.js";
 
 /**
@@ -110,6 +114,25 @@ async function streamPageToResponse(
     /** Called after renderToReadableStream resolves (shell ready) to collect head HTML */
     getHeadHTML: () => string;
     /**
+     * Build the React tree with optional App/Component enhancers applied.
+     * Used by the Pages Router `_document.getInitialProps` contract:
+     *
+     *   ctx.renderPage({ enhanceApp, enhanceComponent })
+     *
+     * When provided alongside a `DocumentComponent.getInitialProps`, the
+     * body is rendered to a string inside `renderPage` (mirroring Next.js's
+     * `loadDocumentInitialProps`) so CSS-in-JS libraries can collect styles.
+     * Must NOT apply `withScriptNonce` — the shared helper owns that.
+     */
+    enhancePageElement?: ((opts: RenderPageEnhancers) => React.ReactElement) | undefined;
+    /** Per-request CSP nonce forwarded to the shared renderPage helper. */
+    scriptNonce?: string | undefined;
+    /**
+     * Minimal `DocumentContext` fields (`pathname`/`query`/`asPath`) forwarded
+     * to `getInitialProps`. Mirrors the prod pipeline for parity.
+     */
+    documentContext?: Record<string, unknown> | undefined;
+    /**
      * Optional: hand a list of `<head>` ReactNodes (returned by user
      * `_document.getInitialProps()`) to the head shim so they're merged
      * into `getSSRHeadHTML()`'s output. Called before `getHeadHTML()`.
@@ -126,33 +149,78 @@ async function streamPageToResponse(
     statusCode = 200,
     extraHeaders,
     getHeadHTML,
+    enhancePageElement,
+    scriptNonce,
+    documentContext,
     setDocumentInitialHead,
   } = options;
 
-  // Start the React body stream FIRST — the promise resolves when the
-  // shell is ready (synchronous content outside Suspense boundaries).
-  // This triggers the render which populates <Head> tags.
-  const bodyStream = await renderToReadableStream(element);
+  // Custom `_document.getInitialProps()` may opt in to wrapping the page tree
+  // via `ctx.renderPage({ enhanceApp, enhanceComponent })` (e.g. styled-
+  // components / emotion style collection). When that contract is in use the
+  // body must be a single complete string before `_document` renders. The
+  // streaming path stays as the default for the common case. The contract
+  // (including `withScriptNonce` and `styles` rendering) lives in the shared
+  // helper so dev and prod stay in lockstep.
+  const documentRenderPage = await runDocumentRenderPage({
+    DocumentComponent,
+    enhancePageElement,
+    renderToReadableStream,
+    renderStylesToString: renderToStringAsync,
+    scriptNonce,
+    context: documentContext,
+  });
 
-  // If the user defined `_document.getInitialProps()`, call it now so any
-  // additional head tags it returns are folded into the same dedupe pipeline
-  // as user `next/head` tags. Matches Next.js's `_document` contract. The
-  // helper skips the call entirely when the resolved `getInitialProps` is the
-  // unmodified default from vinext's `next/document` shim — extending Document
-  // without overriding the method inherits the base implementation, and the
-  // default returns no head tags, so dispatching it on every render is wasted
-  // work.
-  await callDocumentGetInitialProps(DocumentComponent, setDocumentInitialHead);
+  let bodyStream: ReadableStream<Uint8Array>;
+  if (documentRenderPage.status === "rendered") {
+    const synthesised = documentRenderPage.bodyHtml;
+    bodyStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(synthesised));
+        controller.close();
+      },
+    });
+  } else {
+    // Start the React body stream FIRST — the promise resolves when the
+    // shell is ready (synchronous content outside Suspense boundaries).
+    // This triggers the render which populates <Head> tags.
+    bodyStream = await renderToReadableStream(element);
+  }
+
+  // Fold any head tags returned by `_document.getInitialProps()` into the same
+  // dedupe pipeline as user `next/head` tags. Matches Next.js's `_document`
+  // contract. `runDocumentRenderPage` already invokes `getInitialProps` for the
+  // renderPage contract (rendered/consumed), so reuse the head it surfaced
+  // rather than calling it a second time. Only the `skipped` path (no override,
+  // or no `enhancePageElement` wired) falls back to the standalone helper, which
+  // itself skips the unmodified default from vinext's `next/document` shim —
+  // extending Document without overriding the method inherits the base
+  // implementation, and the default returns no head tags, so dispatching it on
+  // every render is wasted work.
+  if (documentRenderPage.status === "skipped") {
+    await callDocumentGetInitialProps(DocumentComponent, setDocumentInitialHead);
+  } else {
+    setDocumentInitialHead?.(documentRenderPage.head);
+  }
 
   // Now that the shell has rendered (and any _document.getInitialProps
   // has injected its tags), collect head HTML.
-  const headHTML = getHeadHTML();
+  let headHTML = getHeadHTML();
+  if (documentRenderPage.status === "rendered" && documentRenderPage.stylesHTML) {
+    headHTML += `\n  ${documentRenderPage.stylesHTML}`;
+  }
 
   // Build the document shell with a placeholder for the body
   let shellTemplate: string;
 
   if (DocumentComponent) {
-    const docProps = await loadUserDocumentInitialProps(DocumentComponent);
+    // When the renderPage path already invoked getInitialProps (rendered or
+    // consumed), reuse its resolved props instead of calling it a second time.
+    // `skipped` means it was never invoked → fall through to the fast path.
+    const docProps =
+      documentRenderPage.status === "skipped"
+        ? await loadUserDocumentInitialProps(DocumentComponent)
+        : documentRenderPage.docProps;
     const docElement = docProps
       ? React.createElement(DocumentComponent, docProps)
       : React.createElement(DocumentComponent);
@@ -1212,6 +1280,48 @@ hydrate();
           DocumentComponent,
           statusCode,
           extraHeaders,
+          // Forward the per-request nonce so the shared renderPage helper can
+          // apply `withScriptNonce` once (it owns that responsibility).
+          scriptNonce,
+          // Minimal DocumentContext for `getInitialProps`, matching prod parity.
+          documentContext: {
+            pathname: patternToNextFormat(route.pattern),
+            query,
+            asPath: url,
+          },
+          // Used by `_document.getInitialProps` -> `ctx.renderPage` to wrap
+          // App/Component with user enhancers (e.g. styled-components,
+          // emotion). The streaming path otherwise renders `element` as-is.
+          // Returns the bare enhanced tree — nonce is applied by the helper.
+          // `pageProps` is captured from the closure (mirrors the prod entry's
+          // `enhancePageElement`) — this closure is only ever invoked for this
+          // one request with this one `pageProps`, so there is nothing to thread
+          // through; the renderPage contract only varies the enhancers.
+          enhancePageElement: (renderPageOpts) => {
+            // oxlint-disable-next-line @typescript-eslint/no-explicit-any
+            let FinalApp: any = AppComponent;
+            // oxlint-disable-next-line @typescript-eslint/no-explicit-any
+            let FinalComp: any = PageComponent;
+            if (renderPageOpts && typeof renderPageOpts.enhanceApp === "function" && FinalApp) {
+              FinalApp = renderPageOpts.enhanceApp(FinalApp);
+            }
+            if (renderPageOpts && typeof renderPageOpts.enhanceComponent === "function") {
+              FinalComp = renderPageOpts.enhanceComponent(FinalComp);
+            }
+            let enhancedElement: React.ReactElement;
+            if (FinalApp) {
+              enhancedElement = createElement(FinalApp, {
+                Component: FinalComp,
+                pageProps,
+              });
+            } else {
+              enhancedElement = createElement(FinalComp, pageProps);
+            }
+            if (wrapWithRouterContext) {
+              enhancedElement = wrapWithRouterContext(enhancedElement);
+            }
+            return enhancedElement;
+          },
           // Collect head HTML AFTER the shell renders (inside streamPageToResponse,
           // after renderToReadableStream resolves). Head tags from Suspense
           // children arrive late — this matches Next.js behavior.

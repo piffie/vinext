@@ -276,6 +276,7 @@ import {
 import {
   handleProgressiveServerActionRequest as __handleProgressiveServerActionRequest,
   handleServerActionRscRequest as __handleServerActionRscRequest,
+  isProgressiveServerActionRequest as __isProgressiveServerActionRequest,
   readActionBodyWithLimit as __readBodyWithLimit,
   readActionFormDataWithLimit as __readFormDataWithLimit,
 } from ${JSON.stringify(appServerActionExecutionPath)};
@@ -803,6 +804,26 @@ export default __createAppRscHandler({
     middlewareContext,
     request,
   }) {
+    // A multipart form POST to a page is always a server-action attempt, so a
+    // body that decodes to no action must surface as 404 action-not-found
+    // (#1340). Route handlers run after this dispatch and accept raw multipart
+    // POSTs, so only flag actual page routes. The __loadPage / __loadRouteHandler
+    // markers are static and available before lazy module hydration.
+    //
+    // Only the progressive (multipart, no actionId) POST path consults
+    // hasPageRoute, so skip the route match entirely for every other request
+    // rather than re-matching on each App Router request.
+    const __isProgressiveAction = __isProgressiveServerActionRequest(
+      request,
+      contentType,
+      actionId,
+    );
+    const __progressiveActionMatch = __isProgressiveAction ? matchRoute(cleanPathname) : null;
+    const __hasPageRoute = Boolean(
+      __progressiveActionMatch &&
+        __progressiveActionMatch.route.__loadPage &&
+        !__progressiveActionMatch.route.__loadRouteHandler,
+    );
     return __handleProgressiveServerActionRequest({
       actionId,
       allowedOrigins: __allowedOrigins,
@@ -816,6 +837,7 @@ export default __createAppRscHandler({
       decodeFormState,
       getAndClearPendingCookies,
       getDraftModeCookieHeader,
+      hasPageRoute: __hasPageRoute,
       maxActionBodySize: __MAX_ACTION_BODY_SIZE,
       middlewareHeaders: middlewareContext.headers,
       readFormDataWithLimit: __readFormDataWithLimit,

@@ -39,6 +39,7 @@ import { filterInternalHeaders, isOpenRedirectShaped } from "./request-pipeline.
 import { notFoundResponse } from "./http-error-responses.js";
 import {
   runPagesRequest,
+  wrapMiddlewareWithBasePath,
   type PagesPipelineDeps,
   type PagesRenderOptions,
 } from "./pages-request-pipeline.js";
@@ -1667,7 +1668,13 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         // Raw query from req.url so redirect Locations aren't re-encoded by URL parsing.
         rawSearch: rawQs,
         matchPageRoute: matchPageRoute ?? null,
-        runMiddleware: typeof runMiddleware === "function" ? runMiddleware : null,
+        // Pass the original (pre-basePath-stripping) URL to middleware so that
+        // request.nextUrl.basePath reflects whether the URL actually had the
+        // basePath prefix (see wrapMiddlewareWithBasePath).
+        runMiddleware:
+          typeof runMiddleware === "function"
+            ? wrapMiddlewareWithBasePath(runMiddleware, basePath, hadBasePath)
+            : null,
         renderPage:
           typeof renderPage === "function"
             ? (

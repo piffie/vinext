@@ -11,6 +11,7 @@ import { compareRoutes, decodeRouteSegment, isInvisibleSegment } from "./utils.j
 import { findFileWithExts, scanWithExtensions, type ValidFileMatcher } from "./file-matcher.js";
 import { validateRoutePatterns } from "./route-validation.js";
 import { compareStrings } from "../utils/compare.js";
+import { normalizePathSeparators } from "../utils/path.js";
 
 type InterceptingRoute = {
   /** The interception convention: "." | ".." | "../.." | "..." */
@@ -2147,7 +2148,8 @@ function discoverSiblingInterceptingRoutes(
   for (const route of routes) {
     const filePath = route.pagePath ?? route.routePath;
     if (!filePath) continue;
-    const routeDir = path.dirname(filePath);
+    // Keys are forward-slash — findOwnerRouteForDir compares in that space.
+    const routeDir = normalizePathSeparators(path.dirname(filePath));
     if (!routesByDir.has(routeDir)) {
       routesByDir.set(routeDir, route);
     }
@@ -2220,14 +2222,24 @@ function discoverSiblingInterceptingRoutes(
  *    any of the above. This handles the case where the marker directory has
  *    no sibling pages at all (e.g. `deep/path/(...)target` with no
  *    `deep/path/page.tsx`).
+ *
+ * All comparisons happen in forward-slash space: `appDir` is forward-slash
+ * (normalized once in the config hook), but `dir` and route file paths
+ * descend through native `path.join`/`path.dirname`, which reintroduce
+ * backslashes on Windows. Without normalizing, the `current === appDir`
+ * termination never fires there and the walk overshoots the app root.
+ * `routesByDir` keys must be forward-slash dirnames of the route file paths.
+ *
+ * Exported for tests.
  */
-function findOwnerRouteForDir(
+export function findOwnerRouteForDir(
   dir: string,
   appDir: string,
   routes: readonly AppRouteGraphRoute[],
   routesByDir: Map<string, AppRouteGraphRoute>,
 ): AppRouteGraphRoute | null {
-  let current = dir;
+  const appRoot = normalizePathSeparators(appDir);
+  let current = normalizePathSeparators(dir);
   while (true) {
     // Exact match: a route whose page/handler file lives directly in `current`
     const exact = routesByDir.get(current);
@@ -2235,12 +2247,12 @@ function findOwnerRouteForDir(
 
     // Subtree match: a route whose page is somewhere under `current` — pick
     // the one with the fewest pattern parts (shallowest / least specific).
-    const currentWithSep = current + path.sep;
+    const currentWithSep = current + "/";
     let best: AppRouteGraphRoute | null = null;
     for (const route of routes) {
       const filePath = route.pagePath ?? route.routePath;
       if (!filePath) continue;
-      if (!filePath.startsWith(currentWithSep)) continue;
+      if (!normalizePathSeparators(filePath).startsWith(currentWithSep)) continue;
       if (!best || route.patternParts.length < best.patternParts.length) {
         best = route;
       }
@@ -2248,7 +2260,7 @@ function findOwnerRouteForDir(
     if (best) return best;
 
     // Stop if we've reached the app root
-    if (current === appDir) break;
+    if (current === appRoot) break;
     const parent = path.dirname(current);
     if (parent === current) break; // filesystem root safety guard
     current = parent;

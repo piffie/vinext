@@ -2025,6 +2025,19 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // cause LightningCSS to fail with "Invalid empty selector" during
           // the production minification step.  See issue #1825.
           css: {
+            ...(nextConfig.useLightningcss
+              ? {
+                  transformer: "lightningcss" as const,
+                  lightningcss: {
+                    ...(nextConfig.lightningCssFeatures.include
+                      ? { include: nextConfig.lightningCssFeatures.include }
+                      : {}),
+                    ...(nextConfig.lightningCssFeatures.exclude
+                      ? { exclude: nextConfig.lightningCssFeatures.exclude }
+                      : {}),
+                  },
+                }
+              : {}),
             ...(postcssOverride ? { postcss: postcssOverride } : {}),
             preprocessorOptions: (() => {
               // Tilde importer: strip the leading ~ and resolve the rest

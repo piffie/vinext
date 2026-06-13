@@ -17,6 +17,16 @@ import type {
 } from "../packages/vinext/src/shims/cache.js";
 
 const FIXTURE_DIR = PAGES_FIXTURE_DIR;
+
+function commitRenderedPagesRouterElement(element: unknown): void {
+  if (typeof document === "undefined" || document.documentElement === undefined) return;
+
+  const props = (element as { props?: unknown } | null)?.props;
+  const onCommit =
+    props && typeof props === "object" ? (props as { onCommit?: unknown }).onCommit : undefined;
+  if (typeof onCommit === "function") queueMicrotask(onCommit as () => void);
+}
+
 describe("vinext next data client helpers", () => {
   it("extracts __NEXT_DATA__ after carriage-return whitespace", () => {
     const json = '{"props":{},"page":"/","query":{}}';
@@ -2682,6 +2692,33 @@ describe("next/router withRouter HOC", () => {
     expect(() => renderToStaticMarkup(React.createElement(Probe))).toThrow(
       "NextRouter was not mounted",
     );
+  });
+
+  it("next/router useRouter falls back to the singleton in a Pages Router browser document", async () => {
+    const React = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { useRouter } = await import("../packages/vinext/src/shims/router.js");
+    const win = (globalThis as { window: Window }).window;
+    const previousPageLoaders = win.__VINEXT_PAGE_LOADERS__;
+
+    try {
+      win.__VINEXT_PAGE_LOADERS__ = {};
+
+      const captured: NextRouter[] = [];
+      function Probe() {
+        captured.push(useRouter());
+        return React.createElement("span", null, "ok");
+      }
+
+      renderToStaticMarkup(React.createElement(Probe));
+
+      const router = captured[0];
+      expect(router).toBeDefined();
+      expect(router?.events).toBeDefined();
+      expect(typeof router?.push).toBe("function");
+    } finally {
+      win.__VINEXT_PAGE_LOADERS__ = previousPageLoaders;
+    }
   });
 
   it("next/router useRouter does not subscribe once per hook call", async () => {
@@ -13482,7 +13519,7 @@ describe("Pages Router concurrent navigation", () => {
   function createNavWindow() {
     const pushState = vi.fn();
     const replaceState = vi.fn();
-    const render = vi.fn();
+    const render = vi.fn((element: unknown) => commitRenderedPagesRouterElement(element));
 
     const win = {
       location: {
@@ -13928,6 +13965,58 @@ describe("Pages Router concurrent navigation", () => {
         delete (globalThis as any).window;
       } else {
         (globalThis as any).window = previousWindow;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("Pages Router HTML fallback prefers the registered route loader", async () => {
+    const previousWindow = (globalThis as any).window;
+    const previousDocument = (globalThis as any).document;
+    const originalFetch = globalThis.fetch;
+    const { win, render } = createNavWindow();
+    const LoaderPage = () => null;
+    const loader = vi.fn(async () => ({ default: LoaderPage }));
+    Object.assign(win, {
+      __VINEXT_PAGE_LOADERS__: {
+        "/same": loader,
+      },
+      __VINEXT_PAGE_PATTERNS__: ["/same"],
+    });
+    (globalThis as any).window = win;
+    (globalThis as any).document = {
+      createElement: vi.fn(),
+      head: { appendChild: vi.fn() },
+    };
+
+    const fetch = vi.fn(
+      async () => new Response(buildNavHtml("/same", "javascript:duplicate-or-invalid")),
+    );
+    globalThis.fetch = fetch;
+
+    try {
+      vi.resetModules();
+      const routerModule = await import("../packages/vinext/src/shims/router.js");
+      const Router = routerModule.default;
+
+      const result = await Router.push("/same");
+
+      expect(result).toBe(true);
+      expect(fetch).toHaveBeenCalledWith("/same", expect.any(Object));
+      expect(loader).toHaveBeenCalledTimes(1);
+      expect(render).toHaveBeenCalled();
+      expect(win.location.href).toBe("http://localhost/same");
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      if (previousDocument === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = previousDocument;
       }
       globalThis.fetch = originalFetch;
     }
@@ -14445,17 +14534,29 @@ describe("Pages Router concurrent navigation", () => {
   // restoration can't position correctly.
   it("popstate restores history-state scroll when manual scroll restoration is off", async () => {
     const previousWindow = (globalThis as any).window;
+    const previousDocument = (globalThis as any).document;
     const originalFetch = globalThis.fetch;
     const originalCustomEvent = globalThis.CustomEvent;
     const listeners = new Map<string, (event: any) => void>();
     const { win, render } = createNavWindow();
     const pageModuleUrl = path.resolve(import.meta.dirname, "fixtures/client-navigation-page.tsx");
+    win.scrollTo.mockImplementation((x: number, y: number) => {
+      win.scrollX = x;
+      win.scrollY = y;
+    });
 
     win.addEventListener = vi.fn((type: string, handler: (event: any) => void) => {
       listeners.set(type, handler);
     });
 
     (globalThis as any).window = win;
+    (globalThis as any).document = {
+      documentElement: {
+        dataset: {},
+        style: {},
+        getClientRects: vi.fn(),
+      },
+    };
     (globalThis as any).CustomEvent = class CustomEventMock {
       constructor(public type: string) {}
     } as any;
@@ -14493,13 +14594,13 @@ describe("Pages Router concurrent navigation", () => {
           __vinext_scrollY: 345,
         },
       });
-      await routeChangeComplete;
 
       // The scroll target is applied inside the render-commit callback; the
       // mocked root.render never mounts React, so fire the commit manually.
-      expect(render).toHaveBeenCalled();
-      const committed = render.mock.calls.at(-1)![0];
+      await vi.waitFor(() => expect(render).toHaveBeenCalled());
+      const committed = render.mock.calls.at(-1)![0] as { props: { onCommit: () => void } };
       committed.props.onCommit();
+      await routeChangeComplete;
 
       expect(win.scrollTo).toHaveBeenCalledWith(12, 345);
     } finally {
@@ -14508,6 +14609,11 @@ describe("Pages Router concurrent navigation", () => {
         delete (globalThis as any).window;
       } else {
         (globalThis as any).window = previousWindow;
+      }
+      if (previousDocument === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = previousDocument;
       }
       globalThis.fetch = originalFetch;
       (globalThis as any).CustomEvent = originalCustomEvent;
@@ -15983,7 +16089,7 @@ describe("Pages Router _next/data client navigation", () => {
   ) {
     const pushState = vi.fn();
     const replaceState = vi.fn();
-    const render = vi.fn();
+    const render = vi.fn((element: unknown) => commitRenderedPagesRouterElement(element));
     const buildId = opts.buildId ?? "test-build";
 
     const win = {
@@ -20784,5 +20890,107 @@ describe("default-locale path normalisation (issue #1336, item 4)", () => {
     expect(
       matchRedirect(normalizeDefaultLocalePathname("/sv/old", i18n), rules, emptyCtx)?.destination,
     ).toBe("/sv/new");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pages Router runtime state sharing
+//
+// Vite can evaluate `next/router` in both the client entry and in page chunks.
+// State that must be consistent across those instances (events, history keys,
+// abort/cancel state, and router readiness) must live on a window-scoped
+// runtime object rather than in module-local variables.
+// ---------------------------------------------------------------------------
+describe("Pages Router runtime state sharing", () => {
+  it("shares router readiness across duplicated next/router module instances", async () => {
+    const previousWindow = (globalThis as any).window;
+    const win: any = {
+      location: {
+        pathname: "/1",
+        search: "",
+        hash: "",
+        href: "http://localhost/1",
+        hostname: "localhost",
+      },
+      history: { state: null, pushState() {}, replaceState() {} },
+      addEventListener() {},
+      dispatchEvent() {},
+      scrollTo() {},
+      __NEXT_DATA__: {
+        page: "/[id]",
+        query: {},
+        autoExport: true,
+        isFallback: false,
+        props: { pageProps: {} },
+      },
+      __VINEXT_PAGE_LOADERS__: {},
+    };
+    (globalThis as any).window = win;
+
+    try {
+      vi.resetModules();
+      const React = await import("react");
+      const { renderToStaticMarkup } = await import("react-dom/server");
+
+      // First `next/router` instance: the generated Pages client entry.
+      const routerModuleA = await import("../packages/vinext/src/shims/router.js");
+      const RouterA = routerModuleA.default;
+      const markReadyA = routerModuleA._markPagesRouterReady;
+
+      // Second `next/router` instance: a later page chunk that re-evaluates the
+      // module and overwrites window.next.router.
+      vi.resetModules();
+      const routerModuleB = await import("../packages/vinext/src/shims/router.js");
+      const RouterB = routerModuleB.default;
+      const useRouterB = routerModuleB.useRouter;
+
+      // Both singletons start with the same deferred-ready state.
+      expect(win.next.router).toBe(RouterB);
+      expect(RouterA.isReady).toBe(false);
+      expect(RouterB.isReady).toBe(false);
+
+      // After hydration, the readiness bit still stays false until the provider
+      // publishes it.
+      win.__NEXT_HYDRATED = true;
+      expect(RouterA.isReady).toBe(false);
+      expect(RouterB.isReady).toBe(false);
+
+      // Simulate the provider mounting and flipping the shared ready bit.
+      expect(markReadyA()).toBe(true);
+      expect(markReadyA()).toBe(false);
+
+      // The readiness transition is visible from every module instance and from
+      // the global singleton.
+      expect(RouterA.isReady).toBe(true);
+      expect(RouterB.isReady).toBe(true);
+      expect(win.next.router.isReady).toBe(true);
+
+      // useRouter() backed by the second instance also converges to ready.
+      function ProbeB() {
+        const router = useRouterB();
+        return React.createElement("span", null, router.isReady ? "ready" : "not-ready");
+      }
+      const htmlB = renderToStaticMarkup(
+        routerModuleB.wrapWithRouterContext(React.createElement(ProbeB)),
+      );
+      expect(htmlB).toBe("<span>ready</span>");
+
+      // And a provider-mounted hook from the first instance sees it too.
+      function ProbeA() {
+        const router = routerModuleA.useRouter();
+        return React.createElement("span", null, router.isReady ? "ready" : "not-ready");
+      }
+      const htmlA = renderToStaticMarkup(
+        routerModuleA.wrapWithRouterContext(React.createElement(ProbeA)),
+      );
+      expect(htmlA).toBe("<span>ready</span>");
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+    }
   });
 });

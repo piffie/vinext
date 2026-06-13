@@ -1,24 +1,33 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 
 const Page = ({ id }) => {
   const router = useRouter();
-  const [ready, setReady] = useState(false);
+  const idRef = useRef(id);
+  idRef.current = id;
+  const [lastEvent, setLastEvent] = useState({ url: null, id });
 
   if (typeof window !== "undefined" && id === "error") {
     throw new Error("Simulated client-side render error");
   }
 
   useEffect(() => {
-    const handler = () => {
-      setReady(true);
+    // Reset the readiness indicator whenever the page id changes so that
+    // back/forward traversals must emit a fresh routeChangeComplete before
+    // the fixture reports "ready" again.
+    setLastEvent((prev) => (prev.id === idRef.current ? prev : { url: null, id: idRef.current }));
+
+    const handler = (url) => {
+      setLastEvent({ url, id: idRef.current });
     };
     router.events.on("routeChangeComplete", handler);
     return () => {
       router.events.off("routeChangeComplete", handler);
     };
   }, [router]);
+
+  const ready = lastEvent.url !== null && lastEvent.id === id;
 
   return (
     <>
@@ -29,9 +38,9 @@ const Page = ({ id }) => {
           background: "blue",
         }}
       />
-      <p>{ready ? "routeChangeComplete" : "loading"}</p>
+      <p>{ready ? `routeChangeComplete:${lastEvent.url}` : "loading"}</p>
       <Link
-        href={`/${Number(id) + 1}`}
+        href={`/${id + 1}`}
         id="link"
         style={{
           marginLeft: 5000,
@@ -49,7 +58,7 @@ const Page = ({ id }) => {
 export default Page;
 
 export const getServerSideProps = (context) => {
-  const { id = "0" } = context.query;
+  const { id = 0 } = context.query;
   return {
     props: {
       id,

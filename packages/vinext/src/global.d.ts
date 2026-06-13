@@ -43,8 +43,9 @@ declare global {
 
     /**
      * High-resolution timestamp recorded after client hydration is usable.
-     * Pages Router writes after hydrateRoot() returns; App Router writes after
-     * the first committed tree attaches browser router state.
+     * Pages Router writes from the stable router provider after passive
+     * effects can attach; App Router writes after the first committed tree
+     * attaches browser router state.
      */
     __VINEXT_HYDRATED_AT: number | undefined;
 

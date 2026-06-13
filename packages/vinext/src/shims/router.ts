@@ -86,6 +86,8 @@ const __scrollRestoration: boolean = process.env.__NEXT_SCROLL_RESTORATION === "
 
 type ScrollPosition = { x: number; y: number };
 const noopCommit = (): void => {};
+const SCROLL_RESTORE_MAX_FRAMES = 60;
+const SCROLL_RESTORE_TOLERANCE_PX = 1;
 
 /**
  * A version of useLayoutEffect that doesn't warn during SSR.
@@ -141,21 +143,26 @@ function renderPagesRouterElement(
 
   return new Promise<void>((resolve, reject) => {
     const cancel = () => {
-      if (_cancelPendingRenderCommit === cancel) _cancelPendingRenderCommit = null;
+      if (routerRuntimeState.cancelPendingRenderCommit === cancel) {
+        routerRuntimeState.cancelPendingRenderCommit = null;
+      }
       reject(new NavigationCancelledError("superseded"));
     };
-    _cancelPendingRenderCommit = cancel;
+    routerRuntimeState.cancelPendingRenderCommit = cancel;
 
-    // Only clear the module-level canceller if it still belongs to this
+    // Only clear the active render canceller if it still belongs to this
     // render; a superseded tree can commit late and must not null out the
     // canceller installed by a newer navigation.
     const clearIfCurrent = () => {
-      if (_cancelPendingRenderCommit === cancel) _cancelPendingRenderCommit = null;
+      if (routerRuntimeState.cancelPendingRenderCommit === cancel) {
+        routerRuntimeState.cancelPendingRenderCommit = null;
+      }
     };
 
-    const scrollHandler = () => {
+    const isCurrent = () => routerRuntimeState.cancelPendingRenderCommit === cancel;
+    const scrollHandler = async () => {
       if (scroll) {
-        window.scrollTo(scroll.x, scroll.y);
+        await restorePagesRouterScrollPosition(scroll, isCurrent);
       }
     };
 
@@ -163,13 +170,19 @@ function renderPagesRouterElement(
       wrapWithRouterContext(
         element,
         () => {
-          clearIfCurrent();
-          try {
-            scrollHandler();
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
+          void (async () => {
+            if (!isCurrent()) return;
+
+            try {
+              await scrollHandler();
+              if (!isCurrent()) return;
+              clearIfCurrent();
+              resolve();
+            } catch (err) {
+              clearIfCurrent();
+              reject(err);
+            }
+          })();
         },
         (error) => {
           clearIfCurrent();
@@ -177,10 +190,84 @@ function renderPagesRouterElement(
         },
       ),
     );
-    if (typeof document === "undefined") {
+    if (!hasBrowserDocument()) {
       clearIfCurrent();
       resolve();
     }
+  });
+}
+
+function hasBrowserDocument(): boolean {
+  return typeof document !== "undefined" && document.documentElement !== undefined;
+}
+
+async function restorePagesRouterScrollPosition(
+  scroll: ScrollPosition,
+  shouldContinue: () => boolean,
+): Promise<void> {
+  if (!shouldContinue()) return;
+
+  scrollToPagesRouterPosition(scroll);
+  if (isAtScrollPosition(scroll)) return;
+
+  let previousScrollPosition = getWindowScrollPosition();
+  for (let frame = 0; frame < SCROLL_RESTORE_MAX_FRAMES; frame += 1) {
+    await waitForNextAnimationFrame();
+    if (!shouldContinue()) return;
+
+    scrollToPagesRouterPosition(scroll);
+    if (isAtScrollPosition(scroll)) return;
+
+    const currentScrollPosition = getWindowScrollPosition();
+    if (
+      currentScrollPosition.x === previousScrollPosition.x &&
+      currentScrollPosition.y === previousScrollPosition.y
+    ) {
+      // Scroll target is unreachable (e.g. the restored page is shorter than
+      // the saved position). Stop retrying so routeChangeComplete is not
+      // delayed by the full frame budget.
+      break;
+    }
+    previousScrollPosition = currentScrollPosition;
+  }
+}
+
+function scrollToPagesRouterPosition({ x, y }: ScrollPosition): void {
+  if (!hasBrowserDocument()) {
+    window.scrollTo(x, y);
+    return;
+  }
+
+  const htmlElement = document.documentElement;
+  const shouldDisableSmoothScroll = htmlElement.dataset.scrollBehavior === "smooth";
+
+  if (!shouldDisableSmoothScroll) {
+    window.scrollTo(x, y);
+    return;
+  }
+
+  const previousScrollBehavior = htmlElement.style.scrollBehavior;
+  htmlElement.style.scrollBehavior = "auto";
+  htmlElement.getClientRects();
+  window.scrollTo(x, y);
+  htmlElement.style.scrollBehavior = previousScrollBehavior;
+}
+
+function isAtScrollPosition({ x, y }: ScrollPosition): boolean {
+  return (
+    Math.abs(window.scrollX - x) <= SCROLL_RESTORE_TOLERANCE_PX &&
+    Math.abs(window.scrollY - y) <= SCROLL_RESTORE_TOLERANCE_PX
+  );
+}
+
+function waitForNextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => resolve());
+      return;
+    }
+
+    setTimeout(resolve, 16);
   });
 }
 
@@ -308,8 +395,88 @@ function createRouterEvents(): RouterEvents {
   };
 }
 
-// Singleton events instance
-const routerEvents = createRouterEvents();
+type PagesRouterRuntimeState = {
+  events: RouterEvents;
+  components?: PagesRouterRuntimeComponents;
+  currentHistoryKey?: string;
+  historyKeyCounter: number;
+  navigationId: number;
+  activeAbortController: AbortController | null;
+  cancelPendingRenderCommit: (() => void) | null;
+  beforePopStateCb?: BeforePopStateCallback;
+  lastPathnameAndSearch: string;
+  isFirstPopStateEvent: boolean;
+  routerDidNavigate: boolean;
+  deprecatedEventBridgeInstalled: boolean;
+  pagesRouterReady: boolean;
+  publicRouter?: Record<string, unknown>;
+};
+
+type PagesRouterRuntimeComponents = {
+  CommitBoundary: ComponentType<{
+    children?: ReactNode;
+    onCommit: () => void;
+    onError: (error: Error) => void;
+  }>;
+  Provider: ComponentType<{ children: ReactNode }>;
+};
+
+const PAGES_ROUTER_RUNTIME_STATE_KEY = Symbol.for("vinext.pagesRouter.runtimeState");
+
+function createPagesRouterRuntimeState(): PagesRouterRuntimeState {
+  return {
+    events: createRouterEvents(),
+    historyKeyCounter: 0,
+    navigationId: 0,
+    activeAbortController: null,
+    cancelPendingRenderCommit: null,
+    lastPathnameAndSearch:
+      typeof window !== "undefined" ? window.location.pathname + window.location.search : "",
+    isFirstPopStateEvent: true,
+    routerDidNavigate: false,
+    deprecatedEventBridgeInstalled: false,
+    pagesRouterReady: typeof window === "undefined" || !shouldDeferInitialPagesRouterReady(),
+  };
+}
+
+function getPagesRouterRuntimeState(): PagesRouterRuntimeState {
+  // Server-side module instances should stay isolated by normal module scope:
+  // there is no browser history to coordinate, and a process-global state object
+  // would only make test/module resets leak between independent SSR renders.
+  if (typeof window === "undefined") return createPagesRouterRuntimeState();
+
+  // In a real browser `window === globalThis`, so this still deduplicates
+  // independently bundled next/router module instances. In tests, though,
+  // each mocked document gets its own `window`; storing on the process global
+  // would leak router state across independent browser documents.
+  const globalObject = window as Window & {
+    [PAGES_ROUTER_RUNTIME_STATE_KEY]?: PagesRouterRuntimeState;
+  };
+  const existing = globalObject[PAGES_ROUTER_RUNTIME_STATE_KEY];
+  if (existing) return existing;
+
+  const state = createPagesRouterRuntimeState();
+  globalObject[PAGES_ROUTER_RUNTIME_STATE_KEY] = state;
+  return state;
+}
+
+const routerRuntimeState = getPagesRouterRuntimeState();
+const routerEvents = routerRuntimeState.events;
+
+function getPagesRouterRuntimeComponents(): PagesRouterRuntimeComponents {
+  const existing = routerRuntimeState.components;
+  if (existing) return existing;
+
+  // Vite can evaluate next/router in both the client entry and page chunks.
+  // React element types must stay identical across those module instances, or
+  // same-route navigations remount the page and lose Next.js' state continuity.
+  const components: PagesRouterRuntimeComponents = {
+    CommitBoundary: PagesRouterCommitBoundary,
+    Provider: PagesRouterProvider,
+  };
+  routerRuntimeState.components = components;
+  return components;
+}
 
 function resolveUrl(url: string | UrlObject): string {
   if (typeof url === "string") return url;
@@ -496,8 +663,6 @@ export function isHashOnlyChange(href: string): boolean {
   return isHashOnlyBrowserUrlChange(href, window.location.href, __basePath);
 }
 
-let _currentHistoryKey: string | undefined;
-
 /**
  * Build router-shaped state for the initial document entry. Captures the
  * active locale (from `window.__VINEXT_LOCALE__`) so a back-navigation
@@ -530,12 +695,13 @@ function stampInitialHistoryState(): void {
 
   const existingState = window.history.state;
   if (existingState !== null && existingState !== undefined) {
-    _currentHistoryKey = getRouterStateKey(existingState) ?? _currentHistoryKey;
+    routerRuntimeState.currentHistoryKey =
+      getRouterStateKey(existingState) ?? routerRuntimeState.currentHistoryKey;
     return;
   }
 
   const initialState = buildInitialRouterState();
-  _currentHistoryKey = initialState.key;
+  routerRuntimeState.currentHistoryKey = initialState.key;
   window.history.replaceState(initialState, "");
 }
 
@@ -558,7 +724,7 @@ function saveScrollPosition(): void {
   const base: Record<string, unknown> = existing ?? buildInitialRouterState();
   const key = getRouterStateKey(base);
   if (key !== undefined) {
-    _currentHistoryKey = key;
+    routerRuntimeState.currentHistoryKey = key;
     saveScrollPositionToSessionStorage(key, position);
   }
   window.history.replaceState({ ...base, ...scroll }, "");
@@ -1014,13 +1180,12 @@ function shouldDeferInitialPagesRouterReady(): boolean {
   );
 }
 
-let _pagesRouterReady =
-  typeof window === "undefined" ? true : !shouldDeferInitialPagesRouterReady();
-
 function isPagesRouterReady(): boolean {
-  // `_pagesRouterReady` initializes to `true` on the server and is only ever
-  // flipped on the client, so this reads correctly in both environments.
-  return _pagesRouterReady;
+  // The ready bit lives in the shared browser runtime state so duplicated
+  // `next/router` module instances (entry + page chunks) observe the same
+  // value. It initialises to `true` on the server, so this reads correctly
+  // in both environments.
+  return routerRuntimeState.pagesRouterReady;
 }
 
 function isPagesRouterDocumentActive(): boolean {
@@ -1032,9 +1197,27 @@ function isPagesRouterDocumentActive(): boolean {
 }
 
 function markPagesRouterReady(): boolean {
-  if (typeof window === "undefined" || _pagesRouterReady) return false;
-  _pagesRouterReady = true;
+  if (typeof window === "undefined" || routerRuntimeState.pagesRouterReady) return false;
+  routerRuntimeState.pagesRouterReady = true;
   return true;
+}
+
+function markPagesRouterHydrated(): void {
+  if (typeof window === "undefined" || window.__NEXT_HYDRATED === true) return;
+
+  const hydratedAt = performance.now();
+  window.__VINEXT_HYDRATED_AT = hydratedAt;
+  window.__NEXT_HYDRATED = true;
+  window.__NEXT_HYDRATED_AT = hydratedAt;
+  window.__NEXT_HYDRATED_CB?.();
+}
+
+function PagesRouterHydrationMarker(): null {
+  useEffect(() => {
+    markPagesRouterHydrated();
+  }, []);
+
+  return null;
 }
 
 function getRouterSnapshot(): ReturnType<typeof getPathnameAndQuery> & { isReady: boolean } {
@@ -1081,32 +1264,9 @@ class HardNavigationScheduledError extends Error {
   }
 }
 
-/**
- * Monotonically increasing ID for tracking the current navigation.
- * Each call to navigateClient() increments this and captures the value.
- * After each async boundary, the navigation checks whether it is still
- * the active one. If a newer navigation has started, the stale one
- * throws NavigationCancelledError so the caller can emit routeChangeError
- * and skip routeChangeComplete.
- *
- * Replaces the old boolean `_navInProgress` guard which silently dropped
- * the second navigation, causing URL/content mismatch.
- */
-let _navigationId = 0;
-
-/** AbortController for the in-flight fetch, so superseded navigations abort network I/O. */
-let _activeAbortController: AbortController | null = null;
-
-/**
- * Pending render-commit rejection, so superseded navigations settle their
- * render-commit Promise instead of hanging when a newer root.render() call
- * starts before the previous tree commits.
- */
-let _cancelPendingRenderCommit: (() => void) | null = null;
-
 function cancelPreviousRenderCommit(): void {
-  _cancelPendingRenderCommit?.();
-  _cancelPendingRenderCommit = null;
+  routerRuntimeState.cancelPendingRenderCommit?.();
+  routerRuntimeState.cancelPendingRenderCommit = null;
 }
 
 function scheduleHardNavigationAndThrow(url: string, message: string): never {
@@ -1358,7 +1518,7 @@ async function navigateClientData(
     }
 
     window.history.replaceState(window.history.state ?? {}, "", redirectedUrl);
-    _lastPathnameAndSearch = window.location.pathname + window.location.search;
+    routerRuntimeState.lastPathnameAndSearch = window.location.pathname + window.location.search;
     await navigateClientHtml(redirectedUrl, redirectedUrl, controller, navId, assertStillCurrent);
     return;
   }
@@ -1590,12 +1750,16 @@ async function navigateClientHtml(
   }
 
   let pageModule: { default?: unknown; [key: string]: unknown };
-  if (!pageModuleUrl) {
-    const loader = window.__VINEXT_PAGE_LOADERS__?.[nextData.page];
-    if (!loader) {
-      scheduleHardNavigationAndThrow(browserUrl, "Navigation failed: no page module URL found");
-    }
+  const loader = window.__VINEXT_PAGE_LOADERS__?.[nextData.page];
+  if (loader) {
+    // Prefer the generated route loader when it exists, even on the HTML
+    // fallback path. Initial hydration uses the same loader map, so this keeps
+    // React component identity stable for same-route param changes. Importing
+    // the extracted chunk URL directly can evaluate a duplicate module when
+    // the router runtime is split across entry and page chunks.
     pageModule = await loader();
+  } else if (!pageModuleUrl) {
+    scheduleHardNavigationAndThrow(browserUrl, "Navigation failed: no page module URL found");
   } else {
     // Validate the module URL before importing — defense-in-depth against
     // unexpected __NEXT_DATA__ or malformed HTML responses
@@ -1658,7 +1822,7 @@ async function navigateClientHtml(
   // Next.js's client Root callback without remounting the page tree.
   if (pendingRedirectHistoryUrl) {
     window.history.replaceState(window.history.state ?? {}, "", pendingRedirectHistoryUrl);
-    _lastPathnameAndSearch = window.location.pathname + window.location.search;
+    routerRuntimeState.lastPathnameAndSearch = window.location.pathname + window.location.search;
   }
   window.__NEXT_DATA__ = nextData;
   applyVinextLocaleGlobals(window, nextData);
@@ -1688,16 +1852,16 @@ async function navigateClient(
   if (typeof window === "undefined") return;
 
   // Cancel any in-flight navigation (abort its fetch, settle its render-commit wait)
-  _activeAbortController?.abort();
+  routerRuntimeState.activeAbortController?.abort();
   cancelPreviousRenderCommit();
   const controller = new AbortController();
-  _activeAbortController = controller;
+  routerRuntimeState.activeAbortController = controller;
 
-  const navId = ++_navigationId;
+  const navId = ++routerRuntimeState.navigationId;
 
   /** Check if this navigation is still the active one. If not, throw. */
   function assertStillCurrent(): void {
-    if (navId !== _navigationId) {
+    if (navId !== routerRuntimeState.navigationId) {
       throw new NavigationCancelledError(url);
     }
   }
@@ -1731,7 +1895,8 @@ async function navigateClient(
             scheduleHardNavigationAndThrow(redirectLocation, "Navigation redirected externally");
           }
           window.history.replaceState(window.history.state ?? {}, "", redirectedUrl);
-          _lastPathnameAndSearch = window.location.pathname + window.location.search;
+          routerRuntimeState.lastPathnameAndSearch =
+            window.location.pathname + window.location.search;
           browserUrl = redirectedUrl;
           htmlFetchUrl = redirectedUrl;
         }
@@ -1759,8 +1924,8 @@ async function navigateClient(
     }
   } finally {
     // Clean up the abort controller if this navigation is still the active one
-    if (navId === _navigationId) {
-      _activeAbortController = null;
+    if (navId === routerRuntimeState.navigationId) {
+      routerRuntimeState.activeAbortController = null;
     }
   }
 }
@@ -1898,7 +2063,7 @@ function updateHistory(
   const key =
     mode === "push"
       ? createHistoryKey()
-      : (previousKey ?? _currentHistoryKey ?? createHistoryKey());
+      : (previousKey ?? routerRuntimeState.currentHistoryKey ?? createHistoryKey());
   const stateUrl = navState?.url ?? fullUrl;
   const stateAs = navState?.as ?? fullUrl;
   const options = navState?.options ?? {};
@@ -1911,9 +2076,9 @@ function updateHistory(
   };
   if (mode === "push") window.history.pushState(state, "", fullUrl);
   else window.history.replaceState(state, "", fullUrl);
-  _currentHistoryKey = key;
-  _lastPathnameAndSearch = window.location.pathname + window.location.search;
-  _routerDidNavigate = true;
+  routerRuntimeState.currentHistoryKey = key;
+  routerRuntimeState.lastPathnameAndSearch = window.location.pathname + window.location.search;
+  routerRuntimeState.routerDidNavigate = true;
 }
 
 /**
@@ -1928,12 +2093,13 @@ type VinextHistoryState = {
   key: string;
 };
 
-let _historyKeyCounter = 0;
 function createHistoryKey(): string {
-  _historyKeyCounter += 1;
+  routerRuntimeState.historyKeyCounter += 1;
   // Same intent as Next.js's createKey() — opaque, monotonic-ish, fine for
   // identifying history entries client-side.
-  return `vinext_${_historyKeyCounter.toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  return `vinext_${routerRuntimeState.historyKeyCounter.toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
 }
 
 /**
@@ -2031,8 +2197,9 @@ async function performNavigation(
 
   // History state metadata — surfaces the active locale to popstate and the
   // Safari-replay filter. `as` is the canonical app-relative path (no
-  // basePath, no hash) so it can be compared against `_lastPathnameAndSearch`
-  // (which is `pathname + search` only) in the popstate handler.
+  // basePath, no hash) so it can be compared against the runtime state's
+  // `lastPathnameAndSearch` (which is `pathname + search` only) in the popstate
+  // handler.
   const navStateOptions: { locale?: string; shallow: boolean } = { shallow };
   if (navigationLocale !== undefined) navStateOptions.locale = navigationLocale;
   const resolvedNoHash = stripHash(resolved);
@@ -2170,13 +2337,26 @@ async function prefetchUrl(url: string): Promise<void> {
  */
 export function useRouter(): NextRouter {
   const router = useContext(RouterContext);
-  if (!router) {
-    throw new Error(
-      "NextRouter was not mounted. https://nextjs.org/docs/messages/next-router-not-mounted",
-    );
+  if (router) {
+    return router;
   }
 
-  return router;
+  // Fallback for the split-chunk compat case: when `useRouter()` is called
+  // outside `PagesRouterProvider` (e.g. from a page chunk that evaluates a
+  // separate `next/router` module before the provider has mounted), return
+  // the module-local Router singleton. This is intentionally non-reactive:
+  // it derives pathname/query from `window.__NEXT_DATA__` and does not
+  // subscribe to `vinext:navigate`, so it won't re-render on navigation.
+  // `wrapWithRouterContext` always provides the reactive context value in
+  // normal usage, so this path only activates in edge cases where the
+  // router module is evaluated outside the provider tree.
+  if (typeof window !== "undefined" && window.__VINEXT_PAGE_LOADERS__ !== undefined) {
+    return Router;
+  }
+
+  throw new Error(
+    "NextRouter was not mounted. https://nextjs.org/docs/messages/next-router-not-mounted",
+  );
 }
 
 function PagesRouterProvider({ children }: { children: ReactNode }): ReactElement {
@@ -2194,9 +2374,13 @@ function PagesRouterProvider({ children }: { children: ReactNode }): ReactElemen
     window.addEventListener("vinext:navigate", onNavigate);
     let cancelled = false;
     const readyTimer = window.setTimeout(() => {
-      if (cancelled || !markPagesRouterReady()) return;
-      setState(getRouterSnapshot());
-      notifyNextNavigationPagesContext();
+      if (cancelled) return;
+
+      const becameReady = markPagesRouterReady();
+      if (becameReady) {
+        setState(getRouterSnapshot());
+        notifyNextNavigationPagesContext();
+      }
     }, 0);
     return () => {
       cancelled = true;
@@ -2244,38 +2428,27 @@ function PagesRouterProvider({ children }: { children: ReactNode }): ReactElemen
     [],
   );
 
-  const content = createElement(RouterContext.Provider, { value: router }, children);
+  const content = createElement(
+    RouterContext.Provider,
+    { value: router },
+    createElement(Fragment, null, children, createElement(PagesRouterHydrationMarker)),
+  );
   return AppRouterContext
     ? createElement(AppRouterContext.Provider, { value: appRouter }, content)
     : content;
 }
 
-// beforePopState callback: called before handling browser back/forward.
-// If it returns false, the navigation is cancelled.
-let _beforePopStateCb: BeforePopStateCallback | undefined;
-
-// Track pathname+search for detecting hash-only back/forward in the popstate
-// handler. Updated after every pushState/replaceState so that popstate can
-// compare the previous value with the (already-changed) window.location.
-let _lastPathnameAndSearch =
-  typeof window !== "undefined" ? window.location.pathname + window.location.search : "";
-
-// Tracks whether we have observed at least one popstate event in this
-// document. Safari fires a synthetic popstate on tab reopen / restore which
-// must be ignored when the carried state matches the page we're already on.
+// `routerRuntimeState.lastPathnameAndSearch` tracks pathname+search for
+// detecting hash-only back/forward in the popstate handler. It is updated after
+// every pushState/replaceState so popstate can compare the previous value with
+// the already-changed window.location.
 //
-// Ported from Next.js: packages/next/src/shared/lib/router/router.ts
-// (the `isFirstPopStateEvent` flag around the `onPopState` handler, ~L935).
-let _isFirstPopStateEvent = true;
-
-// Tracks whether the router has performed any push/replace in this document.
-// The Safari-replay filter (see below) only fires before any user-initiated
-// navigation — once the user has navigated, a back/forward popstate is by
-// definition a real one and must not be filtered out, even if the carried
-// state happens to compare equal to the live URL on the relevant fields
-// (e.g. a hash-only push followed by goBack carries state.as without a hash,
-// matching `_lastPathnameAndSearch` which is also tracked without a hash).
-let _routerDidNavigate = false;
+// `routerRuntimeState.isFirstPopStateEvent` mirrors Next.js's first-popstate
+// Safari replay filter (packages/next/src/shared/lib/router/router.ts around
+// L935). `routerRuntimeState.routerDidNavigate` disables that filter once the
+// document has performed a user navigation; after that, a back/forward popstate
+// is real even if the carried state compares equal to the tracked URL fields
+// (for example, a hash-only push followed by goBack).
 
 function isNextRouterState(state: unknown): state is {
   url?: string;
@@ -2302,8 +2475,8 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   const appUrl = stripBasePath(window.location.pathname, __basePath) + window.location.search;
 
   const state = e.state as unknown;
-  const wasFirst = _isFirstPopStateEvent;
-  _isFirstPopStateEvent = false;
+  const wasFirst = routerRuntimeState.isFirstPopStateEvent;
+  routerRuntimeState.isFirstPopStateEvent = false;
 
   // History entries written by third-party code (state without `__N: true`)
   // are not owned by the router. Mirror Next.js's `if (!state.__N) return`
@@ -2323,7 +2496,7 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   // for the current entry on tab restore / BFCache. Ignore it when the
   // entry's locale matches the active locale AND the entry's `as` matches
   // the URL the router last actively navigated to. We compare against the
-  // router-internal tracker (`_lastPathnameAndSearch`, browser-shaped, with
+  // router-internal tracker (`lastPathnameAndSearch`, browser-shaped, with
   // basePath) rather than the live `window.location` — after a real
   // back/forward the browser URL has already changed but the router tracker
   // still points at the entry we were on, so a genuine navigation is *not*
@@ -2340,25 +2513,25 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   // user has navigated, a popstate is by definition a real back/forward and
   // must not be silently dropped (e.g. a hash-only push then goBack carries
   // state.as without the hash, which would otherwise match
-  // `_lastPathnameAndSearch` and be incorrectly filtered).
-  if (wasFirst && !_routerDidNavigate && isNextRouterState(state)) {
+  // `lastPathnameAndSearch` and be incorrectly filtered).
+  if (wasFirst && !routerRuntimeState.routerDidNavigate && isNextRouterState(state)) {
     const currentLocale = window.__VINEXT_LOCALE__;
     if (
       state.options?.locale === currentLocale &&
       typeof state.as === "string" &&
-      withBasePath(state.as, __basePath) === _lastPathnameAndSearch
+      withBasePath(state.as, __basePath) === routerRuntimeState.lastPathnameAndSearch
     ) {
       return;
     }
   }
 
   // Detect hash-only back/forward: pathname+search unchanged, only hash differs.
-  const isHashOnly = browserUrl === _lastPathnameAndSearch;
+  const isHashOnly = browserUrl === routerRuntimeState.lastPathnameAndSearch;
   const targetKey = getRouterStateKey(state);
   let forcedScroll: ScrollPosition | undefined;
 
   if (manualScrollRestoration) {
-    const currentKey = _currentHistoryKey;
+    const currentKey = routerRuntimeState.currentHistoryKey;
     if (currentKey !== undefined && currentKey !== targetKey) {
       // Reading window scroll here is only correct because manualScrollRestoration
       // implies history.scrollRestoration = "manual", so the browser hasn't yet
@@ -2378,8 +2551,8 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
   }
 
   // Check beforePopState callback
-  if (_beforePopStateCb !== undefined) {
-    const shouldContinue = _beforePopStateCb({
+  if (routerRuntimeState.beforePopStateCb !== undefined) {
+    const shouldContinue = routerRuntimeState.beforePopStateCb({
       url: appUrl,
       as: appUrl,
       options: { shallow: false },
@@ -2389,14 +2562,13 @@ function handlePagesRouterPopState(e: PopStateEvent): void {
 
   // Update trackers only after beforePopState confirms navigation proceeds.
   // If beforePopState cancels, the app stays on the previous history entry,
-  // so both must retain their previous values: `_lastPathnameAndSearch` so
-  // the next popstate compares against the correct baseline, and
-  // `_currentHistoryKey` so subsequent scroll bookkeeping keys off the entry
-  // the app is actually on.
+  // so both must retain their previous values: `lastPathnameAndSearch` so the
+  // next popstate compares against the correct baseline, and `currentHistoryKey`
+  // so subsequent scroll bookkeeping keys off the entry the app is actually on.
   if (targetKey !== undefined) {
-    _currentHistoryKey = targetKey;
+    routerRuntimeState.currentHistoryKey = targetKey;
   }
-  _lastPathnameAndSearch = browserUrl;
+  routerRuntimeState.lastPathnameAndSearch = browserUrl;
 
   if (isHashOnly) {
     // Hash-only back/forward — no page fetch needed.
@@ -2473,23 +2645,25 @@ setPagesRouterPopStateHandler(handlePagesRouterPopState);
  * next/compat/router consumers share one context value instead of each hook
  * installing its own global URL-change listener.
  *
- * The PagesRouterCommitBoundary exists for client navigations: its onCommit
- * callback resolves the render-commit promise (so scroll restoration runs at
- * commit time) and its onError rejection drives the hard-navigation fallback
- * in runNavigateClient. The same boundary intentionally also wraps SSR and
- * initial hydration, where both callbacks default to noopCommit: a
- * hydration-time render error is caught here (React still console.error's
- * it) instead of propagating, matching the navigation-path containment.
+ * The PagesRouterCommitBoundary exists for client navigations: its layout
+ * callback runs scroll restoration at commit time and resolves the navigation
+ * at the same root-commit boundary Next.js awaits before routeChangeComplete.
+ * Its onError rejection drives the hard-navigation fallback in runNavigateClient.
+ * The same boundary intentionally also wraps SSR and initial hydration, where
+ * callbacks default to noopCommit: a hydration-time render error is caught
+ * here (React still console.error's it) instead of propagating, matching the
+ * navigation-path containment.
  */
 export function wrapWithRouterContext(
   element: ReactElement,
   onCommit: () => void = noopCommit,
   onError: (error: Error) => void = noopCommit,
 ): ReactElement {
+  const { CommitBoundary, Provider } = getPagesRouterRuntimeComponents();
   return createElement(
-    PagesRouterCommitBoundary,
+    CommitBoundary,
     { onCommit, onError },
-    createElement(PagesRouterProvider, null, element),
+    createElement(Provider, null, element),
   );
 }
 
@@ -2653,7 +2827,7 @@ const RouterMethods = {
   },
   beforePopState: (cb: BeforePopStateCallback) => {
     if (typeof window === "undefined") throwNoRouterInstance();
-    _beforePopStateCb = cb;
+    routerRuntimeState.beforePopStateCb = cb;
   },
   events: routerEvents,
 };
@@ -2719,7 +2893,16 @@ const Router: typeof RouterMethods & Omit<NextRouter, keyof typeof RouterMethods
     isReady: {
       enumerable: true,
       get(): boolean {
-        return isPagesRouterReady();
+        // `window.next.router.isReady` is used by the Next.js deploy harness as
+        // a post-reload signal before starting client navigations. Keep the
+        // singleton false until the generated Pages client entry's hydration
+        // effect has run, so page-level `useEffect` subscriptions are installed
+        // before tests/userland observe readiness. The provider-backed
+        // `useRouter().isReady` still uses the serialized readiness snapshot to
+        // avoid server/client markup drift during hydration.
+        return (
+          isPagesRouterReady() && (typeof window === "undefined" || window.__NEXT_HYDRATED === true)
+        );
       },
     },
     isPreview: { enumerable: true, value: false, writable: false },
@@ -2732,6 +2915,8 @@ const Router: typeof RouterMethods & Omit<NextRouter, keyof typeof RouterMethods
     },
   }) as typeof RouterMethods & Omit<NextRouter, keyof typeof RouterMethods>;
 
+routerRuntimeState.publicRouter = Router as Record<string, unknown>;
+
 // Deprecated event property bridging: when userland code does
 // `Router.onRouteChangeComplete = handler` (the legacy Next.js pattern),
 // the handler must be called whenever the corresponding event fires.
@@ -2741,11 +2926,9 @@ const Router: typeof RouterMethods & Omit<NextRouter, keyof typeof RouterMethods
 //
 // Ported from Next.js: packages/next/src/client/router.ts (lines 105–124).
 // The reference implementation wraps this in `singletonRouter.ready()` so it
-// runs after the router instance is created; vinext's routerEvents is a module-
-// level singleton that exists from the start, so we can register directly.
-// Registering unconditionally at module load (without a client-only guard) is
-// safe here because every routerEvents.emit() call is already gated behind
-// typeof window checks, so these listeners never fire in SSR contexts.
+// runs after the router instance is created. vinext registers directly against
+// the document-wide events singleton, guarded so duplicate production chunks do
+// not install duplicate bridge handlers.
 const deprecatedRouterEvents = [
   "routeChangeStart",
   "beforeHistoryChange",
@@ -2755,19 +2938,23 @@ const deprecatedRouterEvents = [
   "hashChangeComplete",
 ] as const;
 
-for (const event of deprecatedRouterEvents) {
-  const eventField = `on${event.charAt(0).toUpperCase()}${event.substring(1)}`;
-  routerEvents.on(event, (...args: unknown[]) => {
-    const handler = (Router as Record<string, unknown>)[eventField];
-    if (typeof handler === "function") {
-      try {
-        (handler as (...a: unknown[]) => void)(...args);
-      } catch (err) {
-        console.error(`Error when running the Router event: ${eventField}`);
-        console.error(err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
+if (!routerRuntimeState.deprecatedEventBridgeInstalled) {
+  routerRuntimeState.deprecatedEventBridgeInstalled = true;
+  for (const event of deprecatedRouterEvents) {
+    const eventField = `on${event.charAt(0).toUpperCase()}${event.substring(1)}`;
+    routerEvents.on(event, (...args: unknown[]) => {
+      const routerTarget = routerRuntimeState.publicRouter ?? (Router as Record<string, unknown>);
+      const handler = routerTarget[eventField];
+      if (typeof handler === "function") {
+        try {
+          (handler as (...a: unknown[]) => void)(...args);
+        } catch (err) {
+          console.error(`Error when running the Router event: ${eventField}`);
+          console.error(err instanceof Error ? `${err.message}\n${err.stack}` : String(err));
+        }
       }
-    }
-  });
+    });
+  }
 }
 
 // Expose `window.next.router` for Next.js parity. Pages Router test suites,
@@ -2816,5 +3003,9 @@ const _PAGES_NAVIGATION_ACCESSOR_KEY = Symbol.for(
 );
 (globalThis as Record<PropertyKey, unknown>)[_PAGES_NAVIGATION_ACCESSOR_KEY] =
   getPagesNavigationContext;
+
+// Internal export for unit tests that need to drive the readiness transition
+// without relying on React effect timing in a Node test environment.
+export { markPagesRouterReady as _markPagesRouterReady };
 
 export default Router;

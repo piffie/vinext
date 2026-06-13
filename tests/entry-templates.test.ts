@@ -952,6 +952,32 @@ describe("Pages Router entry template", () => {
     }
   });
 
+  it("keeps the Pages Router client tree shape stable after hydration", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-client-entry-hydrated-"));
+    const pagesDir = path.join(tmpDir, "pages");
+
+    try {
+      fs.mkdirSync(pagesDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(pagesDir, "index.tsx"),
+        "export default function Page() { return null; }",
+      );
+
+      const code = await generateClientEntry(
+        pagesDir,
+        await resolveNextConfig({}),
+        createValidFileMatcher(),
+      );
+
+      expect(code).not.toContain("function VinextHydrationMarker");
+      expect(code).not.toContain("React.createElement(VinextHydrationMarker");
+      expect(code).toContain("element = wrapWithRouterContext(element);");
+      expect(code).toContain("hydrateRoot(container, element, hydrateRootOptions)");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("installs the dev error overlay before loading Pages Router modules", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vinext-pages-client-entry-overlay-"));
     const pagesDir = path.join(tmpDir, "pages");

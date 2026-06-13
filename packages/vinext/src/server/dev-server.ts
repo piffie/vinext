@@ -1392,11 +1392,6 @@ async function hydrate() {
   element = wrapWithRouterContext(element);
   const root = hydrateRoot(document.getElementById("__next"), element, hydrateRootOptions);
   window.__VINEXT_ROOT__ = root;
-  const hydratedAt = performance.now();
-  window.__VINEXT_HYDRATED_AT = hydratedAt;
-  window.__NEXT_HYDRATED = true;
-  window.__NEXT_HYDRATED_AT = hydratedAt;
-  window.__NEXT_HYDRATED_CB?.();
 }
 hydrate();
 </script>`;

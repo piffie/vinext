@@ -114,6 +114,7 @@ export async function generateServerEntry(
     headers: nextConfig?.headers ?? [],
     expireTime: nextConfig?.expireTime,
     cacheMaxMemorySize: nextConfig?.cacheMaxMemorySize,
+    htmlLimitedBots: nextConfig?.htmlLimitedBots,
     i18n: nextConfig?.i18n ?? null,
     // Mirrors Next.js `experimental.disableOptimizedLoading` — when false
     // (the default), page scripts are emitted with `defer` in <head>. See
@@ -358,6 +359,7 @@ const _renderPage = __createPagesPageHandler({
     assetPrefix: vinextConfig.assetPrefix,
     trailingSlash: vinextConfig.trailingSlash,
     expireTime: vinextConfig.expireTime,
+    htmlLimitedBots: vinextConfig.htmlLimitedBots,
     clientTraceMetadata: vinextConfig.clientTraceMetadata,
     disableOptimizedLoading: vinextConfig.disableOptimizedLoading,
   },

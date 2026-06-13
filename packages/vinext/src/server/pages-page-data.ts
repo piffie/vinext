@@ -25,6 +25,7 @@ import {
 import { buildNextDataJsonResponse } from "./pages-data-route.js";
 import { NEXTJS_DEPLOYMENT_ID_HEADER } from "./headers.js";
 import { isSerializableProps } from "./pages-serializable-props.js";
+import { isBotUserAgent } from "../utils/html-limited-bots.js";
 
 type PagesRedirectResult = {
   destination: string;
@@ -183,6 +184,7 @@ export type ResolvePagesPageDataOptions = {
    * Typically sourced from `process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID`.
    */
   deploymentId?: string;
+  htmlLimitedBots?: string;
   pageModule: PagesPageModule;
   params: Record<string, unknown>;
   query: Record<string, unknown>;
@@ -544,7 +546,9 @@ export async function resolvePagesPageData(
     // Render the fallback shell for unlisted paths under `fallback: true`.
     // Data requests resolve props normally so the client can fill in after
     // the loading shell ships (`fallback: 'blocking'` keeps SSRing as before).
-    if (fallback === true && !isValidPath && !options.isDataReq) {
+    const isBotRequest =
+      !!options.userAgent && isBotUserAgent(options.userAgent, options.htmlLimitedBots);
+    if (fallback === true && !isValidPath && !options.isDataReq && !isBotRequest) {
       isFallback = true;
     }
   }

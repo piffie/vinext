@@ -83,6 +83,7 @@ type VinextConfigSubset = {
   assetPrefix: string;
   trailingSlash: boolean;
   expireTime?: number;
+  htmlLimitedBots?: string;
   clientTraceMetadata?: readonly string[];
   disableOptimizedLoading: boolean;
 };
@@ -511,6 +512,7 @@ export function createPagesPageHandler(
           applyRequestContexts: applySSRContext,
           buildId,
           deploymentId: process.env.__VINEXT_DEPLOYMENT_ID || process.env.NEXT_DEPLOYMENT_ID,
+          htmlLimitedBots: vinextConfig.htmlLimitedBots,
           createGsspReqRes() {
             return createPagesReqRes({ body: undefined, query, request, url: routeUrl });
           },

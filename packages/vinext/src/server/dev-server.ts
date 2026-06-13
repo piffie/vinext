@@ -66,6 +66,7 @@ import {
 } from "./pages-document-initial-props.js";
 import { callDocumentGetInitialProps } from "./document-initial-head.js";
 import { loadPagesGetInitialProps } from "./pages-get-initial-props.js";
+import { isBotUserAgent } from "../utils/html-limited-bots.js";
 
 /**
  * Render a React element to a string using renderToReadableStream.
@@ -409,6 +410,7 @@ export function createSSRHandler(
    * `next.config`. When undefined or empty, no meta tags are emitted.
    */
   clientTraceMetadata?: readonly string[],
+  htmlLimitedBots?: string,
 ) {
   const matcher = fileMatcher ?? createValidFileMatcher();
 
@@ -740,7 +742,10 @@ export function createSSRHandler(
           // Render the loading shell for `fallback: true` when the path
           // wasn't pre-rendered. Data requests still resolve real props so
           // the client can swap in after the shell ships.
-          if (fallback === true && !isValidPath && !isDataReq) {
+          const userAgentHeader = req.headers["user-agent"];
+          const userAgent = Array.isArray(userAgentHeader) ? userAgentHeader[0] : userAgentHeader;
+          const isBotRequest = !!userAgent && isBotUserAgent(userAgent, htmlLimitedBots);
+          if (fallback === true && !isValidPath && !isDataReq && !isBotRequest) {
             isFallbackRender = true;
             if (typeof routerShim.setSSRContext === "function") {
               routerShim.setSSRContext({

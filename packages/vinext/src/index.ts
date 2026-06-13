@@ -3793,6 +3793,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                     (nextConfig?.rewrites.afterFiles.length ?? 0) > 0 ||
                     (nextConfig?.rewrites.fallback.length ?? 0) > 0,
                   nextConfig?.clientTraceMetadata,
+                  nextConfig?.htmlLimitedBots,
                 );
                 flushStagedHeaders();
                 flushRequestHeaders();

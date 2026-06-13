@@ -23,7 +23,7 @@ import {
   type AppPageSsrHandler,
 } from "./app-page-stream.js";
 import { AppElementsWire, type AppElements } from "./app-elements.js";
-import { createAppPageLayoutEntries } from "./app-page-route-wiring.js";
+import { createAppPageLayoutEntries, createAppPageSourcePage } from "./app-page-route-wiring.js";
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any
 type AppPageComponent = ComponentType<any>;
@@ -48,6 +48,7 @@ type AppPageBoundaryRscPayloadOptions<TModule extends AppPageModule = AppPageMod
   layoutModules: readonly (TModule | null | undefined)[];
   pathname: string;
   route?: AppPageBoundaryRoute<TModule> | null;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type AppPageBoundaryLayoutEntry = {
@@ -100,6 +101,7 @@ type AppPageBoundaryRenderCommonOptions<TModule extends AppPageModule = AppPageM
   ) => string[];
   rootLayouts: readonly (TModule | null | undefined)[];
   scriptNonce?: string;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type RenderAppPageHttpAccessFallbackOptions<TModule extends AppPageModule = AppPageModule> = {
@@ -248,6 +250,7 @@ function createAppPageBoundaryRscPayload<TModule extends AppPageModule>(
 ): AppElements {
   const routeId = AppElementsWire.encodeRouteId(options.pathname, null);
   const layoutEntries = createAppPageBoundaryLayoutEntries(options.route, options.layoutModules);
+  const sourcePageSegments = options.sourcePageSegments ?? options.route?.routeSegments;
 
   return {
     ...AppElementsWire.createMetadataEntries({
@@ -255,6 +258,7 @@ function createAppPageBoundaryRscPayload<TModule extends AppPageModule>(
       layoutIds: layoutEntries.map((entry) => entry.id),
       rootLayoutTreePath: layoutEntries[0]?.treePath ?? null,
       routeId,
+      sourcePage: sourcePageSegments ? createAppPageSourcePage(sourcePageSegments) : null,
     }),
     [routeId]: options.element,
   };
@@ -278,6 +282,7 @@ async function renderAppPageBoundaryElementResponse<TModule extends AppPageModul
     layoutModules: options.layoutModules,
     pathname,
     route: options.route,
+    sourcePageSegments: options.sourcePageSegments,
   });
 
   return renderAppPageBoundaryResponse({

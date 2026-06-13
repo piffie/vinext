@@ -95,6 +95,7 @@ type AppFallbackRendererCallContext = {
    * render path. Defaults to `false` when no route is matched.
    */
   isEdgeRuntime?: boolean;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type AppFallbackRenderer<TModule extends AppPageModule = AppPageModule> = {
@@ -286,6 +287,7 @@ export function createAppFallbackRenderer<TModule extends AppPageModule>(
         route,
         renderToReadableStream: rscRenderer,
         scriptNonce,
+        sourcePageSegments: callContext?.sourcePageSegments,
         statusCode,
       });
     },
@@ -349,6 +351,7 @@ export function createAppFallbackRenderer<TModule extends AppPageModule>(
         renderToReadableStream: rscRenderer,
         sanitizeErrorForClient: sanitizer,
         scriptNonce,
+        sourcePageSegments: callContext?.sourcePageSegments,
       });
     },
   };

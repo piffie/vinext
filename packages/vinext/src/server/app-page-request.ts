@@ -56,6 +56,7 @@ type AppPageInterceptMatch<TPage = unknown> = {
   slotId?: string | null;
   slotKey: string;
   sourceRouteIndex: number;
+  sourcePageSegments?: readonly string[] | null;
 };
 
 type ResolveAppPageInterceptMatchOptions<TRoute, TPage, TInterceptOpts> = {

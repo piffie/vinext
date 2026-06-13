@@ -37,6 +37,10 @@ function createRenderer(overrides?: {
   globalNotFoundModule?: { default: React.ComponentType<any> } | null;
   rootLayoutModules?: readonly ({ default: React.ComponentType<any> } | null | undefined)[];
   rootNotFoundModule?: { default: React.ComponentType<any> } | null;
+  rscRenderer?: (
+    element: React.ReactNode | AppElements,
+    options: { onError: (error: unknown, requestInfo: unknown, errorContext: unknown) => unknown },
+  ) => ReadableStream<Uint8Array>;
 }) {
   const clearRequestContext = vi.fn();
   const ssrLoader = vi.fn(async () => ({
@@ -87,7 +91,7 @@ function createRenderer(overrides?: {
         rootNotFoundModule: overrides?.rootNotFoundModule ?? null,
         rootUnauthorizedModule: null,
       },
-      rscRenderer: renderElementToStream,
+      rscRenderer: overrides?.rscRenderer ?? renderElementToStream,
       sanitizer: overrides?.sanitizeErrorForClient ?? ((error: Error) => error),
       ssrLoader,
     }),
@@ -220,6 +224,33 @@ describe("app fallback renderer factory", () => {
     expect(html).toContain("route:safe:secret");
   });
 
+  it("preserves sibling-intercept source pages in error boundary RSC payloads", async () => {
+    const { renderer } = createRenderer({
+      rscRenderer(element) {
+        return createStreamFromMarkup(JSON.stringify(element));
+      },
+    });
+    const response = await renderer.renderErrorBoundary(
+      {
+        error: routeErrorModule,
+        layouts: [],
+        params: {},
+        pattern: "/foo/bar",
+        routeSegments: ["foo", "bar"],
+      },
+      new Error("secret"),
+      true,
+      new Request("https://example.com/hoge"),
+      {},
+      undefined,
+      { headers: null, status: null },
+      { sourcePageSegments: ["foo", "bar", "(..)(..)hoge"] },
+    );
+
+    const payload = JSON.parse((await response?.text()) ?? "{}") as Record<string, unknown>;
+    expect(payload.__sourcePage).toBe("/foo/bar/(..)(..)hoge/page");
+  });
+
   it("passes request to createRscOnErrorHandler at call time", async () => {
     const createRscOnErrorHandler = vi.fn(
       (_request: Request, _pathname: string, _routePath: string) => () => null,
@@ -293,6 +324,33 @@ describe("app fallback renderer factory", () => {
     const html = await response?.text();
     expect(html).toContain('data-params-slug="from-route"');
     expect(html).toContain('data-boundary="not-found"');
+  });
+
+  it("preserves sibling-intercept source pages in HTTP fallback RSC payloads", async () => {
+    const { renderer } = createRenderer({
+      rscRenderer(element) {
+        return createStreamFromMarkup(JSON.stringify(element));
+      },
+    });
+    const response = await renderer.renderHttpAccessFallback(
+      {
+        layouts: [],
+        notFound: notFoundModule,
+        params: {},
+        pattern: "/foo/bar",
+        routeSegments: ["foo", "bar"],
+      },
+      404,
+      true,
+      new Request("https://example.com/hoge"),
+      { matchedParams: {} },
+      undefined,
+      { headers: null, status: null },
+      { sourcePageSegments: ["foo", "bar", "(..)(..)hoge"] },
+    );
+
+    const payload = JSON.parse((await response?.text()) ?? "{}") as Record<string, unknown>;
+    expect(payload.__sourcePage).toBe("/foo/bar/(..)(..)hoge/page");
   });
 
   it("uses opts.layouts override instead of route.layouts", async () => {

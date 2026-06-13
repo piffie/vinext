@@ -2259,6 +2259,32 @@ describe("window.next debug global", () => {
     }
   });
 
+  it("setWindowNextInternalSourcePage mirrors the App Router source-page field", async () => {
+    // Ported from Next.js: test/e2e/app-dir/app/index.test.ts
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/app/index.test.ts
+    const previousWindow = (globalThis as any).window;
+    const win: any = {};
+    (globalThis as any).window = win;
+
+    try {
+      vi.resetModules();
+      const { setWindowNextInternalSourcePage } =
+        await import("../packages/vinext/src/client/window-next.js");
+
+      setWindowNextInternalSourcePage("/dashboard/page");
+      expect(win.next.__internal_src_page).toBe("/dashboard/page");
+
+      setWindowNextInternalSourcePage("/dynamic/[category]/[id]/page");
+      expect(win.next.__internal_src_page).toBe("/dynamic/[category]/[id]/page");
+
+      setWindowNextInternalSourcePage(null);
+      expect(win.next.__internal_src_page).toBeUndefined();
+    } finally {
+      (globalThis as any).window = previousWindow;
+      vi.resetModules();
+    }
+  });
+
   it("Pages Router shim installs window.next.router with the expected NextRouter surface", async () => {
     // Build a minimal fake window so importing shims/router.ts (which
     // touches window at module load to attach popstate) does not crash.

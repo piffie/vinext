@@ -199,3 +199,17 @@ export function installWindowNext(fields: Partial<WindowNext>): void {
     ...fields,
   };
 }
+
+export function setWindowNextInternalSourcePage(sourcePage: string | null): void {
+  if (typeof window === "undefined") return;
+
+  installWindowNext({});
+  if (sourcePage === null) {
+    delete window.next?.__internal_src_page;
+    return;
+  }
+
+  const next = window.next;
+  if (!next) return;
+  next.__internal_src_page = sourcePage;
+}

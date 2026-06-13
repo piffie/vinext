@@ -36,6 +36,7 @@ type AppRscInterceptForMatching = {
    * @see https://github.com/vercel/next.js/blob/canary/packages/next/src/lib/generate-interception-routes-rewrites.ts
    */
   sourceMatchPattern?: string;
+  sourcePageSegments?: readonly string[];
   interceptLayouts: readonly unknown[];
   page: unknown;
   __pageLoader?: (() => Promise<unknown>) | null;
@@ -50,6 +51,7 @@ type AppRscSlotForMatching = {
 type AppRscSiblingInterceptForMatching = {
   targetPattern: string;
   sourceMatchPattern: string | null;
+  sourcePageSegments?: readonly string[];
   slotId: string | null;
   interceptLayouts: readonly unknown[];
   page: unknown;
@@ -79,6 +81,7 @@ type AppRscInterceptLookupEntry = {
   targetPatternParts: string[];
   sourceMatchPattern: string | null;
   sourceMatchPatternParts: string[] | null;
+  sourcePageSegments: readonly string[] | null;
   interceptLayouts: readonly unknown[];
   page: unknown;
   __pageLoader?: (() => Promise<unknown>) | null;
@@ -213,6 +216,7 @@ function createInterceptLookup<Route extends AppRscRouteForMatching>(
             targetPatternParts: intercept.targetPattern.split("/").filter(Boolean),
             sourceMatchPattern,
             sourceMatchPatternParts,
+            sourcePageSegments: intercept.sourcePageSegments ?? null,
             interceptLayouts: intercept.interceptLayouts,
             page: intercept.page,
             __pageLoader: intercept.__pageLoader,
@@ -235,6 +239,7 @@ function createInterceptLookup<Route extends AppRscRouteForMatching>(
           targetPatternParts: intercept.targetPattern.split("/").filter(Boolean),
           sourceMatchPattern,
           sourceMatchPatternParts,
+          sourcePageSegments: intercept.sourcePageSegments ?? null,
           interceptLayouts: intercept.interceptLayouts,
           page: intercept.page,
           __pageLoader: intercept.__pageLoader,

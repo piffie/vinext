@@ -368,6 +368,7 @@ describe("app page boundary render helpers", () => {
     expect(payload.__route).toBe("route:/posts/missing");
     expect(payload.__layoutIds).toEqual(["layout:/", "layout:/posts"]);
     expect(payload.__rootLayout).toBe("/");
+    expect(payload.__sourcePage).toBe("/posts/[slug]/page");
     expect(payload["route:/posts/missing"]).toBeTruthy();
   });
 
@@ -470,7 +471,26 @@ describe("app page boundary render helpers", () => {
     expect(payload.__route).toBe("route:/posts/missing");
     expect(payload.__layoutIds).toEqual([]);
     expect(payload.__rootLayout).toBeNull();
+    expect(payload.__sourcePage).toBeUndefined();
     expect(payload["route:/posts/missing"]).toBeTruthy();
+  });
+
+  it("omits source-page metadata when route segments are unavailable", async () => {
+    const common = createCommonOptions();
+    const response = await renderAppPageHttpAccessFallback<TestModule>({
+      ...common,
+      isRscRequest: true,
+      matchedParams: {},
+      renderToReadableStream: renderWirePayloadToStream,
+      route: {
+        notFound: notFoundModule,
+        pattern: "/posts/missing",
+      },
+      statusCode: 404,
+    });
+
+    const payload = JSON.parse((await response?.text()) ?? "{}") as Record<string, unknown>;
+    expect(payload.__sourcePage).toBeUndefined();
   });
 
   it("renders route error boundaries with sanitized errors inside layouts", async () => {
@@ -610,6 +630,7 @@ describe("app page boundary render helpers", () => {
     expect(payload.__route).toBe("route:/posts/missing");
     expect(payload.__layoutIds).toEqual(["layout:/"]);
     expect(payload.__rootLayout).toBe("/");
+    expect(payload.__sourcePage).toBe("/posts/[slug]/page");
     expect(payload["route:/posts/missing"]).toBeTruthy();
   });
 

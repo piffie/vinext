@@ -322,6 +322,7 @@ describe("App RSC route matching", () => {
             {
               targetPattern: "/hoge",
               sourceMatchPattern: "/foo/bar",
+              sourcePageSegments: ["foo", "bar", "(..)(..)hoge"],
               slotId: "slot:__vinext_sibling_intercept:/foo/bar",
               interceptLayouts: [],
               page: { default: () => null },
@@ -337,6 +338,7 @@ describe("App RSC route matching", () => {
       const hit = matcher.findIntercept("/hoge", "/foo/bar");
       expect(hit).not.toBeNull();
       expect(hit?.slotKey).toBe(SIBLING_PAGE_INTERCEPT_SLOT_KEY);
+      expect(hit?.sourcePageSegments).toEqual(["foo", "bar", "(..)(..)hoge"]);
 
       // Hard-nav (no source): must return null
       expect(matcher.findIntercept("/hoge", null)).toBeNull();
@@ -389,6 +391,7 @@ function route(
 type TestSiblingIntercept = {
   targetPattern: string;
   sourceMatchPattern: string | null;
+  sourcePageSegments?: readonly string[];
   slotId: string | null;
   interceptLayouts: readonly unknown[];
   page: unknown;

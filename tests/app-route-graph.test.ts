@@ -1230,6 +1230,7 @@ describe("App Router route graph builder", () => {
         slotKey: string;
         targetPattern: string;
         sourceMatchPattern: string;
+        sourcePageSegments?: string[];
         convention: string;
         params: string[];
       }> = [];
@@ -1241,6 +1242,7 @@ describe("App Router route graph builder", () => {
               slotKey: slot.key,
               targetPattern: ir.targetPattern,
               sourceMatchPattern: ir.sourceMatchPattern,
+              sourcePageSegments: ir.sourcePageSegments,
               convention: ir.convention,
               params: ir.params,
             });
@@ -1255,6 +1257,7 @@ describe("App Router route graph builder", () => {
         ownerRoute: string;
         targetPattern: string;
         sourceMatchPattern: string;
+        sourcePageSegments?: string[];
         convention: string;
         params: string[];
       }> = [];
@@ -1264,6 +1267,7 @@ describe("App Router route graph builder", () => {
             ownerRoute: route.pattern,
             targetPattern: ir.targetPattern,
             sourceMatchPattern: ir.sourceMatchPattern,
+            sourcePageSegments: ir.sourcePageSegments,
             convention: ir.convention,
             params: ir.params,
           });
@@ -1427,6 +1431,7 @@ describe("App Router route graph builder", () => {
           expect.objectContaining({
             targetPattern: "/hoge",
             sourceMatchPattern: "/foo/bar",
+            sourcePageSegments: ["foo", "bar", "@modal", "(..)(..)hoge"],
             convention: "../..",
           }),
         );

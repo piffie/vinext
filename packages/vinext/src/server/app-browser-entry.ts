@@ -64,7 +64,7 @@ import {
   consumeAppRouterScrollIntent,
   type AppRouterScrollIntent,
 } from "vinext/shims/app-router-scroll-state";
-import { installWindowNext } from "../client/window-next.js";
+import { installWindowNext, setWindowNextInternalSourcePage } from "../client/window-next.js";
 import {
   chunksToReadableStream,
   createProgressiveRscStream,
@@ -1042,6 +1042,10 @@ function BrowserRoot({
   useLayoutEffect(() => {
     historyController.rememberHistoryStateSnapshot(treeState);
   }, [treeState]);
+
+  useEffect(() => {
+    setWindowNextInternalSourcePage(AppElementsWire.readMetadata(treeState.elements).sourcePage);
+  }, [treeState.elements]);
 
   useLayoutEffect(() => {
     setMountedSlotsHeader(getMountedSlotIdsHeader(stateRef.current.elements));

@@ -6,6 +6,7 @@ import {
   APP_LAYOUT_IDS_KEY,
   APP_ROOT_LAYOUT_KEY,
   APP_ROUTE_KEY,
+  APP_SOURCE_PAGE_KEY,
   APP_SLOT_BINDINGS_KEY,
 } from "../packages/vinext/src/server/app-elements.js";
 import type { AppPageModule } from "../packages/vinext/src/server/app-page-route-wiring.js";
@@ -390,6 +391,36 @@ describe("buildPageElements", () => {
     // the source route's page component.
     expect(html).toContain("Page has no default export");
     expect(html).not.toContain("Source page content");
+  });
+
+  it("publishes the intercepting page path for sibling interception", async () => {
+    function InterceptPage(): React.ReactNode {
+      return React.createElement("div", null, "Intercepted");
+    }
+
+    const route = createSyntheticRoute({
+      page: createSyntheticPageModule(() => React.createElement("div", null, "Source")),
+      layouts: [],
+      routeSegments: ["foo", "bar"],
+      pattern: "/foo/bar",
+    });
+
+    const result = await buildPageElements(
+      createBaseOptions({
+        route,
+        routePath: "/hoge",
+        opts: {
+          interceptSlotKey: SIBLING_PAGE_INTERCEPT_SLOT_KEY,
+          interceptPage: createSyntheticPageModule(InterceptPage),
+          interceptParams: {},
+          interceptSourcePageSegments: ["foo", "bar", "(..)(..)hoge"],
+        },
+      }),
+    );
+
+    expect((result as Record<string, unknown>)[APP_SOURCE_PAGE_KEY]).toBe(
+      "/foo/bar/(..)(..)hoge/page",
+    );
   });
 
   it("keeps interception context out of the error payload route ID", async () => {

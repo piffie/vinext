@@ -316,6 +316,7 @@ import {
 import { makeThenableParams } from ${JSON.stringify(thenableParamsShimPath)};
 import {
   createAppRscRouteMatcher as __createAppRscRouteMatcher,
+  SIBLING_PAGE_INTERCEPT_SLOT_KEY as __SIBLING_PAGE_INTERCEPT_SLOT_KEY,
 } from ${JSON.stringify(appRscRouteMatchingPath)};
 import {
   appIsrHtmlKey as __isrHtmlKey,
@@ -748,10 +749,22 @@ export default __createAppRscHandler({
         }));
       },
       renderErrorBoundaryPage(renderErr) {
-        return __fallbackRenderer.renderErrorBoundary(route, renderErr, isRscRequest, request, params, scriptNonce, middlewareContext, { isEdgeRuntime: __isEdgeRuntime(__segmentConfig.runtime) });
+        const __activeIntercept = findIntercept(cleanPathname, interceptionContext);
+        return __fallbackRenderer.renderErrorBoundary(route, renderErr, isRscRequest, request, params, scriptNonce, middlewareContext, {
+          isEdgeRuntime: __isEdgeRuntime(__segmentConfig.runtime),
+          sourcePageSegments: __activeIntercept?.slotKey === __SIBLING_PAGE_INTERCEPT_SLOT_KEY
+            ? __activeIntercept.sourcePageSegments
+            : null,
+        });
       },
       renderHttpAccessFallbackPage(statusCode, opts, currentMiddlewareContext) {
-        return __fallbackRenderer.renderHttpAccessFallback(route, statusCode, isRscRequest, request, opts, scriptNonce, currentMiddlewareContext, { isEdgeRuntime: __isEdgeRuntime(__segmentConfig.runtime) });
+        const __activeIntercept = findIntercept(cleanPathname, interceptionContext);
+        return __fallbackRenderer.renderHttpAccessFallback(route, statusCode, isRscRequest, request, opts, scriptNonce, currentMiddlewareContext, {
+          isEdgeRuntime: __isEdgeRuntime(__segmentConfig.runtime),
+          sourcePageSegments: __activeIntercept?.slotKey === __SIBLING_PAGE_INTERCEPT_SLOT_KEY
+            ? __activeIntercept.sourcePageSegments
+            : null,
+        });
       },
       renderToReadableStream,
       request,
@@ -979,6 +992,7 @@ export default __createAppRscHandler({
           interceptSlotId: intercept.slotId,
           interceptSlotKey: intercept.slotKey,
           interceptSourceMatchedUrl: interceptionContext,
+          interceptSourcePageSegments: intercept.sourcePageSegments,
           interceptPage: intercept.page,
           interceptParams: intercept.matchedParams,
         };

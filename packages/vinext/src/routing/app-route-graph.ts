@@ -36,6 +36,8 @@ type InterceptingRoute = {
   sourceMatchPattern: string;
   /** Absolute path to the intercepting page component */
   pagePath: string;
+  /** Filesystem segments from app/ root to the intercepting page directory. */
+  sourcePageSegments?: string[];
   /** Absolute layout paths inside the intercepting route tree, outermost to innermost */
   layoutPaths: string[];
   /** Parameter names for dynamic segments */
@@ -2404,6 +2406,9 @@ function collectInterceptingPages(
         targetPattern: targetPattern.pattern,
         sourceMatchPattern,
         pagePath: page,
+        sourcePageSegments: normalizePathSeparators(path.relative(appDir, path.dirname(page)))
+          .split("/")
+          .filter(Boolean),
         params: targetPattern.params,
       });
     }

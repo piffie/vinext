@@ -1763,6 +1763,12 @@ describe("build-time defines (Pages Router)", () => {
     const defineKey = "process.env.__NEXT_APP_SHELLS";
     expect(server.config.define?.[defineKey]).toBe(JSON.stringify(false));
   });
+
+  it("App navigation failure handling defaults to false", () => {
+    expect(server.config.define?.["process.env.__NEXT_APP_NAV_FAIL_HANDLING"]).toBe(
+      JSON.stringify(false),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -298,7 +298,7 @@ export function createOptimisticRouteTemplate(options: {
     href: options.href,
     routeManifest: options.routeManifest,
   });
-  if (match === null || !match.route.isDynamic) return null;
+  if (match === null || (!options.allowLoadingShell && !match.route.isDynamic)) return null;
   if (options.interceptionContext !== null) return null;
 
   const metadata = AppElementsWire.readMetadata(options.elements);
@@ -358,7 +358,7 @@ export function resolveOptimisticNavigationPayload(options: {
     href: options.href,
     routeManifest: options.routeManifest,
   });
-  if (match === null || !match.route.isDynamic) return null;
+  if (match === null) return null;
 
   const template = options.templates.get(
     getOptimisticRouteTemplateKey({

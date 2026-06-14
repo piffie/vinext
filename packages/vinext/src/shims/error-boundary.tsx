@@ -4,6 +4,8 @@ import React from "react";
 // Import the local shim, not the public next/navigation alias. The built
 // package may execute this file before the plugin's resolveId hook is active.
 import { decodeRedirectError, isRedirectError, usePathname, useRouter } from "./navigation.js";
+import DefaultGlobalError from "./default-global-error.js";
+import { handleAppNavigationFailure } from "../client/app-nav-failure-handler.js";
 import { VINEXT_DEV_ERROR_RECOVERY_EVENT } from "../utils/dev-error-recovery-event.js";
 import { isNavigationSignalError } from "../utils/navigation-signal.js";
 
@@ -23,6 +25,7 @@ type RedirectBoundaryState = {
 };
 
 type ErrorBoundaryInnerProps = {
+  isImplicitRootErrorBoundary?: boolean;
   pathname: string | null;
 } & ErrorBoundaryProps;
 
@@ -190,6 +193,9 @@ export class ErrorBoundaryInner extends React.Component<
     state: ErrorBoundaryState,
   ): ErrorBoundaryState | null {
     const nextResetState = readBoundaryResetState(props);
+    if (state.error && handleAppNavigationFailure(state.error.thrownValue)) {
+      return { error: null, ...nextResetState };
+    }
     if (state.error && shouldResetBoundary(nextResetState, state)) {
       return { error: null, ...nextResetState };
     }
@@ -271,7 +277,11 @@ export function GlobalErrorBoundary({
   // change (the ErrorBoundaryInner default), matching Next.js's RootErrorBoundary
   // which also has no per-segment reset key.
   return (
-    <ErrorBoundaryInner pathname={pathname} fallback={fallback}>
+    <ErrorBoundaryInner
+      pathname={pathname}
+      fallback={fallback}
+      isImplicitRootErrorBoundary={fallback === DefaultGlobalError}
+    >
       {children}
     </ErrorBoundaryInner>
   );
@@ -519,6 +529,7 @@ export function UnauthorizedBoundary({ fallback, children, resetKey }: Unauthori
 // ---------------------------------------------------------------------------
 
 export type DevRecoveryBoundaryProps = {
+  isImplicitRootErrorBoundary?: boolean;
   resetKey: number;
   // Called from componentDidCatch with the current resetKey so the host can
   // run any pending side effects that NavigationCommitSignal would normally

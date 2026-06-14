@@ -1,9 +1,17 @@
 import React from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
+  createDevOnCaughtError,
   createOnUncaughtError,
+  createProdOnCaughtError,
   prodOnCaughtError,
+  prodOnRecoverableError,
 } from "../packages/vinext/src/server/app-browser-error.js";
+import {
+  clearAppNavigationFailureTarget,
+  handleAppNavigationFailure,
+  stageAppNavigationFailureTarget,
+} from "../packages/vinext/src/client/app-nav-failure-handler.js";
 import { applyServerActionResultDecision } from "../packages/vinext/src/server/app-browser-server-action-navigation.js";
 import {
   createDiscardedServerActionRefreshScheduler,
@@ -2628,7 +2636,7 @@ describe("app browser navigation controller", () => {
       void controller.renderNavigationPayload({
         payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
-        createNavigationCommitEffect: () => vi.fn(),
+        createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
         navigationSnapshot: stateRef.current.navigationSnapshot,
         nextElements,
@@ -2681,7 +2689,7 @@ describe("app browser navigation controller", () => {
       const result = controller.renderNavigationPayload({
         payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
-        createNavigationCommitEffect: () => vi.fn(),
+        createNavigationCommitEffect: () => () => {},
         historyUpdateMode: "push",
         navigationSnapshot: createClientNavigationRenderSnapshot(
           "https://example.com/marketing",
@@ -2844,6 +2852,7 @@ describe("app browser navigation controller", () => {
   it("skips stale browser navigations before committing their payload", async () => {
     const { controller, detach } = createControllerHarness();
     const { assign } = stubWindow("https://example.com/initial");
+    vi.stubEnv("__NEXT_APP_NAV_FAIL_HANDLING", "true");
     const createNavigationCommitEffect = vi.fn(() => vi.fn());
     let resolveNextElements: ((value: AppElements) => void) | undefined;
     const nextElements = new Promise<AppElements>((resolve) => {
@@ -2852,6 +2861,7 @@ describe("app browser navigation controller", () => {
 
     try {
       const navId = controller.beginNavigation();
+      stageAppNavigationFailureTarget("/dashboard");
       const renderPromise = controller.renderNavigationPayload({
         payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
         actionType: "navigate",
@@ -2881,8 +2891,56 @@ describe("app browser navigation controller", () => {
       await expect(renderPromise).resolves.toBe("no-commit");
       expect(createNavigationCommitEffect).not.toHaveBeenCalled();
       expect(assign).not.toHaveBeenCalled();
+      expect(window.next?.__pendingUrl).toBeUndefined();
     } finally {
       detach();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("preserves a newer same-URL failure target when an older navigation is discarded", async () => {
+    const { controller, detach } = createControllerHarness();
+    stubWindow("https://example.com/initial");
+    vi.stubEnv("__NEXT_APP_NAV_FAIL_HANDLING", "true");
+    let resolveNextElements!: (value: AppElements) => void;
+
+    try {
+      stageAppNavigationFailureTarget("/dashboard");
+      const olderTarget = window.next?.__pendingUrl;
+      const olderNavId = controller.beginNavigation();
+      const renderPromise = controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+        actionType: "navigate",
+        createNavigationCommitEffect: () => () => {},
+        historyUpdateMode: "push",
+        navigationSnapshot: createClientNavigationRenderSnapshot("https://example.com/initial", {}),
+        nextElements: new Promise<AppElements>((resolve) => {
+          resolveNextElements = resolve;
+        }),
+        operationLane: "navigation",
+        params: {},
+        pendingRouterState: null,
+        previousNextUrl: null,
+        targetHref: "https://example.com/dashboard",
+        navId: olderNavId,
+      });
+
+      controller.beginNavigation();
+      stageAppNavigationFailureTarget("/dashboard");
+      const newerTarget = window.next?.__pendingUrl;
+      expect(newerTarget).not.toBe(olderTarget);
+
+      resolveNextElements(
+        createResolvedElements("route:/dashboard", "/", null, {
+          "page:/dashboard": React.createElement("main", null, "dashboard"),
+        }),
+      );
+
+      await expect(renderPromise).resolves.toBe("no-commit");
+      expect(window.next?.__pendingUrl).toBe(newerTarget);
+    } finally {
+      detach();
+      vi.unstubAllEnvs();
     }
   });
 
@@ -2931,6 +2989,83 @@ describe("app browser navigation controller", () => {
       expect(settled).toBe(false);
     } finally {
       detach();
+    }
+  });
+
+  it("does not clear a newer navigation failure target when an older render commits", async () => {
+    const { controller, detach, stateRef } = createControllerHarness();
+    vi.stubEnv("__NEXT_APP_NAV_FAIL_HANDLING", "true");
+    vi.stubGlobal("window", {
+      location: {
+        href: "https://example.com/initial",
+        origin: "https://example.com",
+      },
+      next: {},
+    });
+
+    try {
+      stageAppNavigationFailureTarget("/older");
+      const olderNavId = controller.beginNavigation();
+      void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+        actionType: "navigate",
+        createNavigationCommitEffect: () => () => {},
+        historyUpdateMode: "push",
+        navigationSnapshot: stateRef.current.navigationSnapshot,
+        nextElements: Promise.resolve(
+          createResolvedElements("route:/older", "/", null, {
+            "page:/older": React.createElement("main", null, "older"),
+          }),
+        ),
+        operationLane: "navigation",
+        params: {},
+        pendingRouterState: null,
+        previousNextUrl: null,
+        targetHref: "https://example.com/older",
+        navId: olderNavId,
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      let resolveNewer!: (elements: AppElements) => void;
+      stageAppNavigationFailureTarget("/newer");
+      const newerNavId = controller.beginNavigation();
+      void controller.renderNavigationPayload({
+        payloadOrigin: FRESH_APP_NAVIGATION_PAYLOAD_ORIGIN,
+        actionType: "navigate",
+        createNavigationCommitEffect: () => () => {},
+        historyUpdateMode: "push",
+        navigationSnapshot: stateRef.current.navigationSnapshot,
+        nextElements: new Promise<AppElements>((resolve) => {
+          resolveNewer = resolve;
+        }),
+        operationLane: "navigation",
+        params: {},
+        pendingRouterState: null,
+        previousNextUrl: null,
+        targetHref: "https://example.com/newer",
+        navId: newerNavId,
+      });
+
+      controller.clearCommittedNavigationFailureTargets(1);
+      expect(window.next?.__pendingUrl?.pathname).toBe("/newer");
+
+      resolveNewer(
+        createResolvedElements("route:/newer", "/", null, {
+          "page:/newer": React.createElement("main", null, "newer"),
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      controller.clearCommittedNavigationFailureTargets(2);
+      expect(window.next?.__pendingUrl).toBeUndefined();
+    } finally {
+      detach();
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -6043,6 +6178,38 @@ describe("app browser RSC redirect lifecycle", () => {
 });
 
 describe("devOnCaughtError (hydrateRoot dev handler)", () => {
+  it("routes the framework dev recovery boundary through the uncaught handler", () => {
+    const onCaughtError = vi.fn();
+    const onImplicitRootError = vi.fn();
+    const handler = createDevOnCaughtError(onCaughtError, onImplicitRootError);
+    const error = new Error("navigation render failed");
+    const errorInfo = {
+      componentStack: "\n    at Lazy",
+      errorBoundary: { props: { isImplicitRootErrorBoundary: true } },
+    };
+
+    handler(error, errorInfo);
+
+    expect(onImplicitRootError).toHaveBeenCalledWith(error, errorInfo);
+    expect(onCaughtError).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit dev error boundaries on the caught-error path", () => {
+    const onCaughtError = vi.fn();
+    const onImplicitRootError = vi.fn();
+    const handler = createDevOnCaughtError(onCaughtError, onImplicitRootError);
+    const error = new Error("route error");
+    const errorInfo = {
+      componentStack: "\n    at Page",
+      errorBoundary: { props: { isImplicitRootErrorBoundary: false } },
+    };
+
+    handler(error, errorInfo);
+
+    expect(onCaughtError).toHaveBeenCalledWith(error, errorInfo);
+    expect(onImplicitRootError).not.toHaveBeenCalled();
+  });
+
   it("ignores redirect sentinels handled by RedirectBoundary", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -6581,79 +6748,104 @@ describe("dev overlay store", () => {
 });
 
 describe("createOnUncaughtError (hydrateRoot uncaught handler)", () => {
-  function withFakeWindow<T>(fn: (assignSpy: ReturnType<typeof vi.fn>) => T): T {
+  function withFakeWindow<T>(
+    fn: (spies: {
+      assignSpy: ReturnType<typeof vi.fn>;
+      reportErrorSpy: ReturnType<typeof vi.fn>;
+    }) => T,
+  ): T {
     const assignSpy = vi.fn();
+    const reportErrorSpy = vi.fn();
     const originalWindow = (globalThis as { window?: unknown }).window;
+    const originalReportError = Object.getOwnPropertyDescriptor(globalThis, "reportError");
     (globalThis as { window?: unknown }).window = {
       location: { assign: assignSpy },
     };
+    Object.defineProperty(globalThis, "reportError", {
+      configurable: true,
+      value: reportErrorSpy,
+      writable: true,
+    });
     try {
-      return fn(assignSpy);
+      return fn({ assignSpy, reportErrorSpy });
     } finally {
       if (originalWindow === undefined) {
         delete (globalThis as { window?: unknown }).window;
       } else {
         (globalThis as { window?: unknown }).window = originalWindow;
       }
+      if (originalReportError) {
+        Object.defineProperty(globalThis, "reportError", originalReportError);
+      } else {
+        delete (globalThis as { reportError?: unknown }).reportError;
+      }
     }
   }
 
-  it("hard-navigates to the recovery href when one is pending", () => {
+  it("reports the error globally without writing to console.error", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      withFakeWindow((assignSpy) => {
-        const handler = createOnUncaughtError(() => "/broken-route");
-        handler(new Error("render boom"), {});
-        expect(assignSpy).toHaveBeenCalledWith("/broken-route");
-      });
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it("does not navigate when no navigation is in flight (initial hydration error)", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      withFakeWindow((assignSpy) => {
-        const handler = createOnUncaughtError(() => null);
-        handler(new Error("hydration boom"), {});
-        expect(assignSpy).not.toHaveBeenCalled();
-      });
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it("logs the error and component stack regardless of recovery", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      withFakeWindow(() => {
-        const handler = createOnUncaughtError(() => null);
+      withFakeWindow(({ reportErrorSpy }) => {
+        const handler = createOnUncaughtError();
         const err = new Error("boom");
         handler(err, { componentStack: "\n    at Page (page.tsx:10)" });
-        const loggedFirst = consoleSpy.mock.calls[0]?.[0];
-        expect(loggedFirst).toBe(err);
-        expect(String(consoleSpy.mock.calls[1]?.[0])).toContain("page.tsx:10");
+        expect(reportErrorSpy).toHaveBeenCalledWith(err);
+        expect(consoleSpy).not.toHaveBeenCalled();
       });
     } finally {
       consoleSpy.mockRestore();
     }
   });
 
-  it("reads the recovery href lazily so newer navigations win", () => {
-    // Module-level pendingNavigationRecoveryHref is reassigned across
-    // navigations; the handler must read it at call time, not at construction.
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("leaves navigation failure dispatch to the global error listener", () => {
+    withFakeWindow(({ assignSpy, reportErrorSpy }) => {
+      const handler = createOnUncaughtError();
+      const error = new Error("late error");
+      handler(error, {});
+      expect(reportErrorSpy).toHaveBeenCalledWith(error);
+      expect(assignSpy).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("app navigation failure handling", () => {
+  it("hard-navigates to the latest pending URL when enabled", () => {
+    vi.stubEnv("__NEXT_APP_NAV_FAIL_HANDLING", "true");
+    const originalWindow = globalThis.window;
+    const assign = vi.fn();
+    globalThis.window = {
+      location: { assign, href: "https://example.com/current" },
+      next: { version: "vinext" },
+    } as unknown as Window & typeof globalThis;
+
     try {
-      withFakeWindow((assignSpy) => {
-        let current: string | null = "/first";
-        const handler = createOnUncaughtError(() => current);
-        current = "/second";
-        handler(new Error("late error"), {});
-        expect(assignSpy).toHaveBeenCalledWith("/second");
-      });
+      stageAppNavigationFailureTarget("/first");
+      stageAppNavigationFailureTarget("/latest");
+      expect(handleAppNavigationFailure(new Error("boom"))).toBe(true);
+      expect(assign).toHaveBeenCalledWith("https://example.com/latest");
     } finally {
-      consoleSpy.mockRestore();
+      globalThis.window = originalWindow;
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("clears only the matching committed URL", () => {
+    vi.stubEnv("__NEXT_APP_NAV_FAIL_HANDLING", "true");
+    const originalWindow = globalThis.window;
+    globalThis.window = {
+      location: { href: "https://example.com/current" },
+      next: { version: "vinext" },
+    } as unknown as Window & typeof globalThis;
+
+    try {
+      stageAppNavigationFailureTarget("/latest");
+      clearAppNavigationFailureTarget("/older");
+      expect(window.next?.__pendingUrl?.pathname).toBe("/latest");
+      clearAppNavigationFailureTarget("/latest");
+      expect(window.next?.__pendingUrl).toBeUndefined();
+    } finally {
+      globalThis.window = originalWindow;
+      vi.unstubAllEnvs();
     }
   });
 });
@@ -6704,6 +6896,51 @@ describe("prodOnCaughtError (hydrateRoot prod handler)", () => {
     }
   });
 
+  it("routes implicit root-boundary errors through the uncaught handler", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const onImplicitRootError = vi.fn();
+      const handler = createProdOnCaughtError(onImplicitRootError);
+      const err = new Error("hydration mismatch");
+
+      handler(err, {
+        componentStack: "\n    at Lazy",
+        errorBoundary: {
+          props: { isImplicitRootErrorBoundary: true },
+        },
+      });
+
+      expect(onImplicitRootError).toHaveBeenCalledWith(
+        err,
+        expect.objectContaining({ componentStack: "\n    at Lazy" }),
+      );
+      expect(consoleSpy).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("does not treat explicit segment boundaries as implicit", () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const onImplicitRootError = vi.fn();
+      const handler = createProdOnCaughtError(onImplicitRootError);
+      const err = new Error("segment error");
+
+      handler(err, {
+        componentStack: "\n    at Page",
+        errorBoundary: {
+          props: { isImplicitRootErrorBoundary: false },
+        },
+      });
+
+      expect(onImplicitRootError).not.toHaveBeenCalled();
+      expect(consoleSpy.mock.calls.map((args) => args[0])).toContain(err);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
   it("includes the React component stack in the log when provided", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -6743,6 +6980,44 @@ describe("prodOnCaughtError (hydrateRoot prod handler)", () => {
   });
 });
 
+describe("prodOnRecoverableError (hydrateRoot prod handler)", () => {
+  function withFakeReportError<T>(fn: (reportErrorSpy: ReturnType<typeof vi.fn>) => T): T {
+    const reportErrorSpy = vi.fn();
+    const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, "reportError");
+    Object.defineProperty(globalThis, "reportError", {
+      configurable: true,
+      value: reportErrorSpy,
+      writable: true,
+    });
+    try {
+      return fn(reportErrorSpy);
+    } finally {
+      if (originalDescriptor) {
+        Object.defineProperty(globalThis, "reportError", originalDescriptor);
+      } else {
+        delete (globalThis as { reportError?: unknown }).reportError;
+      }
+    }
+  }
+
+  it("reports recoverable hydration errors through reportError", () => {
+    withFakeReportError((reportErrorSpy) => {
+      const err = new Error("Minified React error #418");
+      prodOnRecoverableError(err);
+      expect(reportErrorSpy).toHaveBeenCalledWith(err);
+    });
+  });
+
+  it("reports the underlying cause when React provides one", () => {
+    withFakeReportError((reportErrorSpy) => {
+      const cause = new Error("server/client text mismatch");
+      const err = new Error("recoverable", { cause });
+      prodOnRecoverableError(err);
+      expect(reportErrorSpy).toHaveBeenCalledWith(cause);
+    });
+  });
+});
+
 describe("app browser form-state hydration", () => {
   it("schedules App Router hydrateRoot inside a transition", () => {
     const container = { nodeType: 1 } as Element;
@@ -6776,6 +7051,7 @@ describe("app browser form-state hydration", () => {
     const formState = ["action-result", "key-path", "reference-id", 1] as never;
     const global = { [RSC_FORM_STATE_GLOBAL]: formState };
     const onCaughtError = vi.fn();
+    const onRecoverableError = vi.fn();
     const onUncaughtError = vi.fn();
     const hydrateRoot = vi.fn();
 
@@ -6783,6 +7059,7 @@ describe("app browser form-state hydration", () => {
     const hydrateOptions = createVinextHydrateRootOptions({
       formState: consumedFormState,
       onCaughtError,
+      onRecoverableError,
       onUncaughtError,
     });
     hydrateRoot("document", "root", hydrateOptions);
@@ -6796,6 +7073,7 @@ describe("app browser form-state hydration", () => {
     expect(hydrateOptions).toEqual({
       formState,
       onCaughtError,
+      onRecoverableError,
       onUncaughtError,
     });
   });

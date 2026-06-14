@@ -1,4 +1,10 @@
-import { startTransition, useLayoutEffect, type Dispatch, type ReactNode } from "react";
+import {
+  startTransition,
+  useInsertionEffect,
+  useLayoutEffect,
+  type Dispatch,
+  type ReactNode,
+} from "react";
 import { flushSync } from "react-dom";
 import {
   activateNavigationSnapshot,
@@ -36,6 +42,10 @@ import {
 } from "./app-browser-action-result.js";
 import type { AppElements } from "./app-elements.js";
 import type { NavigationRuntimeVisibleCommitMode } from "../client/navigation-runtime.js";
+import {
+  clearAppNavigationFailureTarget,
+  getAppNavigationFailureTarget,
+} from "../client/app-nav-failure-handler.js";
 
 export type HistoryUpdateMode = "push" | "replace";
 
@@ -47,6 +57,8 @@ export type PendingBrowserRouterState = {
 export type NavigationPayloadOutcome = "committed" | "no-commit" | "hard-navigate";
 type HardNavigationMode = "assign" | "replace";
 
+type BrowserNavigationCommitEffect = () => void;
+
 type BrowserNavigationCommitEffectFactory = (options: {
   bfcacheIds: Readonly<Record<string, string>>;
   href: string;
@@ -55,7 +67,7 @@ type BrowserNavigationCommitEffectFactory = (options: {
   params: Record<string, string | string[]>;
   previousNextUrl: string | null;
   targetHistoryIndex?: number | null;
-}) => () => void;
+}) => BrowserNavigationCommitEffect;
 
 type BrowserRouterStateRef = {
   current: AppRouterState;
@@ -138,6 +150,7 @@ type BrowserNavigationController = {
    * navigation would otherwise be lost.
    */
   drainPrePaintEffects(renderId: number): void;
+  clearCommittedNavigationFailureTargets(renderId: number): void;
   NavigationCommitSignal(
     this: void,
     {
@@ -269,7 +282,8 @@ export function createAppBrowserNavigationController(
   let nextNavigationRenderId = 0;
   let activeNavigationId = 0;
   const pendingNavigationCommits = new Map<number, () => void>();
-  const pendingNavigationPrePaintEffects = new Map<number, () => void>();
+  const pendingNavigationFailureTargets = new Map<number, URL>();
+  const pendingNavigationPrePaintEffects = new Map<number, BrowserNavigationCommitEffect>();
 
   let setBrowserRouterState: Dispatch<AppRouterState | Promise<AppRouterState>> | null = null;
   let browserRouterStateRef: BrowserRouterStateRef | null = null;
@@ -454,6 +468,17 @@ export function createAppBrowserNavigationController(
     }
   }
 
+  function clearCommittedNavigationFailureTargets(renderId: number): void {
+    for (const [pendingId, targetHref] of pendingNavigationFailureTargets) {
+      if (pendingId > renderId) {
+        continue;
+      }
+
+      pendingNavigationFailureTargets.delete(pendingId);
+      clearAppNavigationFailureTarget(targetHref);
+    }
+  }
+
   async function hmrReplaceTree(
     nextElements: Promise<AppElements>,
     navigationSnapshot: ClientNavigationRenderSnapshot,
@@ -491,6 +516,10 @@ export function createAppBrowserNavigationController(
       children?: ReactNode;
     },
   ): ReactNode {
+    useInsertionEffect(() => {
+      clearCommittedNavigationFailureTargets(renderId);
+    }, [renderId]);
+
     useLayoutEffect(() => {
       drainPrePaintEffects(renderId);
 
@@ -656,6 +685,10 @@ export function createAppBrowserNavigationController(
     visibleCommitMode?: NavigationRuntimeVisibleCommitMode;
   }): Promise<NavigationPayloadOutcome> {
     const renderId = allocateRenderId();
+    const failureTarget = getAppNavigationFailureTarget(options.targetHref);
+    if (failureTarget) {
+      pendingNavigationFailureTargets.set(renderId, failureTarget);
+    }
     let resolveCommitted: (() => void) | undefined;
     const committed = new Promise<void>((resolve) => {
       resolveCommitted = resolve;
@@ -689,6 +722,10 @@ export function createAppBrowserNavigationController(
 
       if (approval.decision.disposition === "no-commit") {
         settlePendingBrowserRouterState(options.pendingRouterState);
+        pendingNavigationFailureTargets.delete(renderId);
+        if (failureTarget) {
+          clearAppNavigationFailureTarget(failureTarget);
+        }
         pendingNavigationCommits.delete(renderId);
         resolveCommitted?.();
         consumeAppRouterScrollIntent(options.scrollIntent ?? null);
@@ -697,9 +734,16 @@ export function createAppBrowserNavigationController(
 
       if (approval.decision.disposition === "hard-navigate") {
         settlePendingBrowserRouterState(options.pendingRouterState);
+        pendingNavigationFailureTargets.delete(renderId);
         pendingNavigationCommits.delete(renderId);
         consumeAppRouterScrollIntent(options.scrollIntent ?? null);
-        return performHardNavigation(options.targetHref) ? "hard-navigate" : "no-commit";
+        if (performHardNavigation(options.targetHref)) {
+          return "hard-navigate";
+        }
+        if (failureTarget) {
+          clearAppNavigationFailureTarget(failureTarget);
+        }
+        return "no-commit";
       }
 
       const approvedCommit = approval.approvedCommit;
@@ -728,6 +772,7 @@ export function createAppBrowserNavigationController(
         options.visibleCommitMode ?? "transition",
       );
     } catch (error) {
+      pendingNavigationFailureTargets.delete(renderId);
       pendingNavigationPrePaintEffects.delete(renderId);
       pendingNavigationCommits.delete(renderId);
       if (snapshotActivated) {
@@ -864,6 +909,7 @@ export function createAppBrowserNavigationController(
     commitSameUrlNavigatePayload,
     hmrReplaceTree,
     drainPrePaintEffects,
+    clearCommittedNavigationFailureTargets,
     NavigationCommitSignal,
   };
 }

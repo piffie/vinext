@@ -289,7 +289,7 @@ describe("Link App Router prefetch mode", () => {
       expect(canAutoPrefetchFullAppRoute("/blog/hello-world")).toBe(false);
       expect(canAutoPrefetchFullAppRoute("/docs/a/b")).toBe(false);
       expect(canAutoPrefetchFullAppRoute("/products/1")).toBe(true);
-      expect(canAutoPrefetchFullAppRoute("/settings")).toBe(true);
+      expect(canAutoPrefetchFullAppRoute("/settings")).toBe(false);
       expect(canAutoPrefetchFullAppRoute("/missing")).toBe(false);
     } finally {
       if (originalWindow === undefined) {
@@ -300,7 +300,7 @@ describe("Link App Router prefetch mode", () => {
     }
   });
 
-  it("allows automatic dynamic App Router routes without loading shells to seed navigation cache", () => {
+  it("shell-prefetches routes with loading boundaries and full-prefetches routes without them", () => {
     const originalWindow = globalThis.window;
     (globalThis as any).window = {
       location: {
@@ -328,7 +328,7 @@ describe("Link App Router prefetch mode", () => {
         shouldPrefetch: true,
       });
       expect(resolveAutoAppRoutePrefetch("/settings")).toEqual({
-        cacheForNavigation: true,
+        cacheForNavigation: false,
         prefetchShellFirst: true,
         shouldPrefetch: true,
       });

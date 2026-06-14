@@ -1485,6 +1485,20 @@ describe("resolveNextConfig gestureTransition", () => {
   });
 });
 
+describe("resolveNextConfig appNavFailHandling", () => {
+  it("defaults experimental.appNavFailHandling to false", async () => {
+    const resolved = await resolveNextConfig({});
+    expect(resolved.appNavFailHandling).toBe(false);
+  });
+
+  it("reads experimental.appNavFailHandling from next.config", async () => {
+    const resolved = await resolveNextConfig({
+      experimental: { appNavFailHandling: true },
+    });
+    expect(resolved.appNavFailHandling).toBe(true);
+  });
+});
+
 describe("resolveNextConfig hashSalt", () => {
   const OLD_ENV = process.env.NEXT_HASH_SALT;
 
@@ -1830,6 +1844,7 @@ describe("detectNextIntlConfig", () => {
       resolveExtensions: null,
       serverResolveExtensions: null,
       cacheComponents: false,
+      appNavFailHandling: false,
       gestureTransition: false,
       prefetchInlining: false,
       redirects: [],

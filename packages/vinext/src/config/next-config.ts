@@ -284,6 +284,8 @@ export type NextConfig = {
     defineServer?: Record<string, string | number | boolean>;
   };
   experimental?: {
+    /** Enables hard-navigation recovery when App Router navigation rendering fails. */
+    appNavFailHandling?: boolean;
     /**
      * Enables the experimental App Router gesture transition API:
      * `useRouter().experimental_gesturePush()`.
@@ -348,6 +350,7 @@ export type ResolvedNextConfig = {
   serverResolveExtensions: string[] | null;
   instrumentationClientInject: string[];
   cacheComponents: boolean;
+  appNavFailHandling: boolean;
   /**
    * Enables the experimental App Router gesture transition API:
    * `useRouter().experimental_gesturePush()`.
@@ -1278,6 +1281,7 @@ export async function resolveNextConfig(
       resolveExtensions: null,
       serverResolveExtensions: null,
       cacheComponents: false,
+      appNavFailHandling: false,
       gestureTransition: false,
       prefetchInlining: false,
       redirects: [],
@@ -1595,6 +1599,7 @@ export async function resolveNextConfig(
         )
       : [],
     cacheComponents: config.cacheComponents ?? false,
+    appNavFailHandling: experimental?.appNavFailHandling === true,
     gestureTransition: experimental?.gestureTransition === true,
     prefetchInlining,
     redirects,

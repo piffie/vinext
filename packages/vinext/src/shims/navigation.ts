@@ -17,6 +17,10 @@ import {
   type NavigationRuntimeVisibleCommitMode,
 } from "../client/navigation-runtime.js";
 import { notifyAppRouterTransitionStart } from "../client/instrumentation-client-state.js";
+import {
+  clearAppNavigationFailureTarget,
+  stageAppNavigationFailureTarget,
+} from "../client/app-nav-failure-handler.js";
 import { INITIAL_BFCACHE_ID, PUBLIC_INITIAL_BFCACHE_ID } from "../server/app-bfcache-id.js";
 import { AppElementsWire } from "../server/app-elements.js";
 import { resolveManifestNavigationInterceptionContext } from "../server/app-browser-interception-context.js";
@@ -55,6 +59,7 @@ import {
   beginAppRouterScrollIntent,
   clearAppRouterScrollIntent,
   consumeAppRouterScrollIntent,
+  getPendingAppRouterScrollIntent,
   type AppRouterScrollIntent,
 } from "./app-router-scroll-state.js";
 
@@ -1682,7 +1687,10 @@ function commitHashOnlyHistoryState(href: string, mode: "push" | "replace", scro
   }
 }
 
-function applyAppRouterScrollFallback(intent: AppRouterScrollIntent): void {
+// Exported for direct unit coverage of the document-top fallback decision; not
+// part of the next/navigation public API. The fallback runs after a committed
+// navigation declined to consume its scroll intent (see navigateClientSide).
+export function applyAppRouterScrollFallback(intent: AppRouterScrollIntent): void {
   if (typeof document === "undefined" || typeof window === "undefined") {
     return;
   }
@@ -1692,7 +1700,27 @@ function applyAppRouterScrollFallback(intent: AppRouterScrollIntent): void {
     return;
   }
 
+  // Next's legacy App Router scroll handler can fail to scroll when the
+  // target route's first DOM child is a React-hoisted stylesheet in <head>.
+  // The committed AppRouterScrollTarget detects that case for this navigation
+  // and marks the intent, so we must not mask the observable old-handler
+  // behavior by synthesizing a document-top scroll. The flag is per-intent: a
+  // hoisted stylesheet merely present in <head> for an unrelated navigation
+  // does not suppress this fallback.
+  if (intent.targetHoistedInHead) {
+    return;
+  }
+
   document.documentElement.scrollTop = 0;
+}
+
+function scheduleAppRouterScrollFallback(intent: AppRouterScrollIntent): void {
+  queueMicrotask(() => {
+    const pendingIntent = getPendingAppRouterScrollIntent();
+    if (pendingIntent === null || pendingIntent.id !== intent.id) return;
+    const fallbackIntent = consumeAppRouterScrollIntent(intent);
+    if (fallbackIntent) applyAppRouterScrollFallback(fallbackIntent);
+  });
 }
 
 /**
@@ -1772,6 +1800,7 @@ export async function navigateClientSide(
   }
 
   const fullHref = toBrowserNavigationHref(normalizedHref, window.location.href, __basePath);
+  stageAppNavigationFailureTarget(fullHref);
   // Match Next.js: App Router reports navigation start before dispatching,
   // including hash-only navigations that short-circuit after URL update.
   notifyAppRouterTransitionStart(fullHref, mode);
@@ -1792,7 +1821,9 @@ export async function navigateClientSide(
     targetHref: fullHref,
   });
   if (earlyIntent.kind === "sameDocumentScroll") {
+    clearAppRouterScrollIntent();
     commitHashOnlyHistoryState(fullHref, earlyIntent.mode, earlyIntent.scroll);
+    clearAppNavigationFailureTarget(fullHref);
     commitClientNavigationState();
     if (earlyIntent.scroll) {
       scrollToHashTarget(earlyIntent.hash);
@@ -1865,10 +1896,7 @@ export async function navigateClientSide(
   }
 
   if (scrollIntent) {
-    const fallbackIntent = consumeAppRouterScrollIntent(scrollIntent);
-    if (fallbackIntent) {
-      applyAppRouterScrollFallback(fallbackIntent);
-    }
+    scheduleAppRouterScrollFallback(scrollIntent);
   }
 }
 

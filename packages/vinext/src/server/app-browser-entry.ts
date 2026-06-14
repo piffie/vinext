@@ -134,15 +134,28 @@ import {
   createPopstateRestoreHandler,
   restoreSynchronousPopstateScrollPosition,
 } from "./app-browser-popstate.js";
-import { DevRecoveryBoundary, RedirectBoundary } from "vinext/shims/error-boundary";
+import {
+  DevRecoveryBoundary,
+  GlobalErrorBoundary,
+  RedirectBoundary,
+} from "vinext/shims/error-boundary";
+import DefaultGlobalError from "vinext/shims/default-global-error";
 import { AppRouterContext } from "vinext/shims/internal/app-router-context";
 import { BfcacheStateKeyMapContext, ElementsContext, Slot } from "vinext/shims/slot";
 import type { RouteManifest } from "../routing/app-route-graph.js";
-import { createOnUncaughtError, prodOnCaughtError } from "./app-browser-error.js";
+import {
+  createDevOnCaughtError,
+  createOnUncaughtError,
+  createProdOnCaughtError,
+  prodOnRecoverableError,
+} from "./app-browser-error.js";
+import {
+  clearAppNavigationFailureTarget,
+  installAppNavigationFailureListeners,
+} from "../client/app-nav-failure-handler.js";
 import { createClientReuseManifestHeaderFromVisibleAppState } from "./app-browser-client-reuse-manifest.js";
 import {
   devOnCaughtError,
-  devOnUncaughtError,
   dismissOverlay,
   installDevErrorOverlay,
   installViteHmrErrorHandler,
@@ -313,15 +326,13 @@ const visitedResponseCache = new Map<string, VisitedResponseCacheEntry>();
 // the HMR handler to distinguish "still hydrating" (wait) from "was up, then
 // torn down by a render error" (full reload to recover).
 let browserRouterStateHasEverCommitted = false;
-// Most recent navigation target that has been dispatched but not yet committed.
-// Read by the onUncaughtError handler so a render error tearing down the tree
-// can land the browser on the URL the user was actually navigating to, instead
-// of stranding them on the previous URL with a blank page. Cleared once the
-// commit effect runs (URL update succeeded) or the navigation is superseded.
-let pendingNavigationRecoveryHref: string | null = null;
 const mpaNavigationScheduler = new AppBrowserMpaNavigationScheduler();
 const unresolvedMpaNavigation = new Promise<never>(() => {});
 const RSC_HMR_SETTLE_DELAY_MS = 150;
+const DEFAULT_GLOBAL_ERROR_COMPONENT = DefaultGlobalError as React.ComponentType<{
+  error: unknown;
+  reset: () => void;
+}>;
 let latestRscHmrUpdateId = 0;
 // Single-slot latch tracking the navId of the most recent synchronous
 // popstate snapshot restore. activeNavigationId is strictly monotonic, so
@@ -559,7 +570,7 @@ function createNavigationCommitEffect(options: {
     });
 
     // URL has been updated; the recovery hard-nav target is no longer needed.
-    pendingNavigationRecoveryHref = null;
+    clearAppNavigationFailureTarget(href);
     commitClientNavigationState(navId);
   };
 }
@@ -583,33 +594,25 @@ async function renderNavigationPayload(
   visibleCommitMode: NavigationRuntimeVisibleCommitMode = "transition",
 ): Promise<NavigationPayloadOutcome> {
   syncServerActionHttpFallbackHead(null);
-  try {
-    return await browserNavigationController.renderNavigationPayload({
-      actionType,
-      createNavigationCommitEffect: (options) => {
-        pendingNavigationRecoveryHref = options.href;
-        return createNavigationCommitEffect(options);
-      },
-      historyUpdateMode,
-      navigationSnapshot,
-      nextElements: payload,
-      operationLane,
-      payloadOrigin,
-      params,
-      pendingRouterState,
-      previousNextUrl,
-      scrollIntent,
-      restoredBfcacheIds,
-      reuseCurrentBfcacheIds,
-      targetHistoryIndex: traversalIntent === null ? undefined : traversalIntent.targetHistoryIndex,
-      targetHref,
-      navId,
-      visibleCommitMode,
-    });
-  } catch (error) {
-    pendingNavigationRecoveryHref = null;
-    throw error;
-  }
+  return browserNavigationController.renderNavigationPayload({
+    actionType,
+    createNavigationCommitEffect,
+    historyUpdateMode,
+    navigationSnapshot,
+    nextElements: payload,
+    operationLane,
+    payloadOrigin,
+    params,
+    pendingRouterState,
+    previousNextUrl,
+    scrollIntent,
+    restoredBfcacheIds,
+    reuseCurrentBfcacheIds,
+    targetHistoryIndex: traversalIntent === null ? undefined : traversalIntent.targetHistoryIndex,
+    targetHref,
+    navId,
+    visibleCommitMode,
+  });
 }
 
 function resolveActionRedirectTarget(
@@ -1064,21 +1067,24 @@ function BrowserRoot({
       },
     });
     browserRouterStateHasEverCommitted = true;
-    // App Router uses this timestamp as first committed tree readiness: the
-    // browser router state is attached and link/router interactions can safely
-    // observe the committed tree. It is intentionally later than hydrateRoot()
-    // returning.
-    const hydratedAt = performance.now();
-    window.__VINEXT_HYDRATED_AT = hydratedAt;
-    window.__NEXT_HYDRATED = true;
-    window.__NEXT_HYDRATED_AT = hydratedAt;
-    window.__NEXT_HYDRATED_CB?.();
     return () => {
       registerNavigationRuntimeFunctions({ navigateExternal: undefined });
       detach();
       setMountedSlotsHeader(null);
     };
   }, [setTreeStateValue]);
+
+  // Next.js publishes its deploy-test hydration marker from a passive effect in
+  // app-index's Root wrapper. Keep the same timing: route client effects have
+  // committed, so callers that mutate the document after __NEXT_HYDRATED_CB
+  // cannot race the initial hydration pass.
+  useEffect(() => {
+    const hydratedAt = performance.now();
+    window.__VINEXT_HYDRATED_AT = hydratedAt;
+    window.__NEXT_HYDRATED = true;
+    window.__NEXT_HYDRATED_AT = hydratedAt;
+    window.__NEXT_HYDRATED_CB?.();
+  }, []);
 
   // This effect snapshots treeState against the controller's current traversal
   // index but only depends on [treeState]. The ordering works because the
@@ -1165,6 +1171,7 @@ function BrowserRoot({
     ? createElement(
         DevRecoveryBoundary,
         {
+          isImplicitRootErrorBoundary: true,
           resetKey: treeState.renderId,
           onCatch: handleDevRecoveryBoundaryCatch,
         },
@@ -1177,16 +1184,21 @@ function BrowserRoot({
     { commitId: treeState.renderId },
     committedTree,
   );
+  const rootErrorTree = createElement(GlobalErrorBoundary, {
+    fallback: DEFAULT_GLOBAL_ERROR_COMPONENT,
+    // oxlint-disable-next-line react/no-children-prop -- This generated browser entry is TypeScript, not TSX.
+    children: scrollScopedTree,
+  });
 
   const ClientNavigationRenderContext = getClientNavigationRenderContext();
   if (!ClientNavigationRenderContext) {
-    return scrollScopedTree;
+    return rootErrorTree;
   }
 
   return createElement(
     ClientNavigationRenderContext.Provider,
     { value: treeState.navigationSnapshot },
-    scrollScopedTree,
+    rootErrorTree,
   );
 }
 
@@ -1601,6 +1613,7 @@ async function main(): Promise<void> {
   if (!claimInitialAppRouterBootstrap()) return;
 
   registerServerActionCallback();
+  installAppNavigationFailureListeners();
 
   if (import.meta.env.DEV) {
     installDevErrorOverlay();
@@ -1628,23 +1641,18 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
   );
   historyController.writeBootstrapHistoryMetadata();
 
-  // In dev we route uncaught errors into the dev overlay rather than the
-  // hard-nav recovery: the overlay is what the developer needs to see, and a
-  // recovery nav would wipe it. In prod we keep the recovery hard-nav so the
-  // user lands on a renderable URL with the actual error UI.
-  const onUncaughtError = import.meta.env.DEV
-    ? devOnUncaughtError
-    : createOnUncaughtError(() => pendingNavigationRecoveryHref);
+  const onUncaughtError = createOnUncaughtError();
   const formState = consumeInitialFormState(getVinextBrowserGlobal());
   const hydrateRootOptions = import.meta.env.DEV
     ? createVinextHydrateRootOptions({
         formState,
-        onCaughtError: devOnCaughtError,
+        onCaughtError: createDevOnCaughtError(devOnCaughtError, onUncaughtError),
         onUncaughtError,
       })
     : createVinextHydrateRootOptions({
         formState,
-        onCaughtError: prodOnCaughtError,
+        onCaughtError: createProdOnCaughtError(onUncaughtError),
+        onRecoverableError: prodOnRecoverableError,
         onUncaughtError,
       });
   const children = createElement(BrowserRoot, {
@@ -1708,7 +1716,11 @@ function bootstrapHydration(rscStream: ReadableStream<Uint8Array>): void {
         : null;
     const performHardNavigationForScrollIntent = (targetHref: string): boolean => {
       consumeAppRouterScrollIntent(scrollIntent ?? null);
-      return browserNavigationController.performHardNavigation(targetHref);
+      const didNavigate = browserNavigationController.performHardNavigation(targetHref);
+      if (!didNavigate) {
+        clearAppNavigationFailureTarget(targetHref);
+      }
+      return didNavigate;
     };
     // Traversal restores history-state ids before identity matching. Any
     // redirect hop that changes currentHref must null this before commit so

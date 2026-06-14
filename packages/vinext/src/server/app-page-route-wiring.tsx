@@ -11,11 +11,13 @@ import {
 import {
   ErrorBoundary,
   ForbiddenBoundary,
+  GlobalErrorBoundary,
   NotFoundBoundary,
   RedirectBoundary,
   UnauthorizedBoundary,
 } from "vinext/shims/error-boundary";
 import { AppRouterScrollTarget } from "vinext/shims/app-router-scroll";
+import DefaultGlobalError from "vinext/shims/default-global-error";
 import type { AppRouteSemanticIds } from "../routing/app-route-graph.js";
 import { LayoutSegmentProvider } from "vinext/shims/layout-segment-context";
 import {
@@ -66,6 +68,7 @@ type AppPageComponentProps = {
 type AppPageComponent = ComponentType<AppPageComponentProps>;
 type AppPageErrorComponent = ComponentType<{ error: unknown; reset: () => void }>;
 const APP_PAGE_LAYOUT_PROBE_CHILD = <Fragment />;
+const DEFAULT_GLOBAL_ERROR_COMPONENT = DefaultGlobalError as AppPageErrorComponent;
 
 export type AppPageModule = Record<string, unknown> & {
   default?: AppPageComponent | null | undefined;
@@ -1056,9 +1059,15 @@ export function buildAppPageElements<
   }
 
   const globalErrorComponent = getErrorBoundaryExport(options.globalErrorModule);
-  if (globalErrorComponent) {
-    routeChildren = <ErrorBoundary fallback={globalErrorComponent}>{routeChildren}</ErrorBoundary>;
-  }
+  routeChildren = (
+    <GlobalErrorBoundary fallback={DEFAULT_GLOBAL_ERROR_COMPONENT}>
+      {globalErrorComponent ? (
+        <ErrorBoundary fallback={globalErrorComponent}>{routeChildren}</ErrorBoundary>
+      ) : (
+        routeChildren
+      )}
+    </GlobalErrorBoundary>
+  );
 
   elements[routeId] = (
     <>

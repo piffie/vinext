@@ -1703,6 +1703,73 @@ describe("app page route wiring helpers", () => {
     expect(errorBoundary?.props.resetKey).toBe("slug|intro|d");
   });
 
+  it("nests user global errors inside the default global error fallback", () => {
+    function UserGlobalError() {
+      return createElement("p", null, "User global error");
+    }
+
+    const elements = buildAppPageElements({
+      element: createElement(PageProbe),
+      globalErrorModule: { default: UserGlobalError },
+      makeThenableParams(params) {
+        return Promise.resolve(params);
+      },
+      matchedParams: {},
+      resolvedMetadata: null,
+      resolvedViewport: {},
+      route: {
+        error: null,
+        errors: [null],
+        layoutTreePositions: [0],
+        layouts: [{ default: RootLayout }],
+        loading: null,
+        notFound: null,
+        notFounds: [null],
+        routeSegments: [],
+        slots: {},
+        templateTreePositions: [],
+        templates: [],
+      },
+      routePath: "/",
+      rootNotFoundModule: null,
+    });
+
+    const routeEntry = elements["route:/"];
+    const outerBoundary = findElementByTypeName(routeEntry, "GlobalErrorBoundary");
+    const userBoundary = findElementByTypeName(outerBoundary?.props.children, "ErrorBoundary");
+
+    expect(getElementTypeName(outerBoundary?.props.fallback)).toBe("DefaultGlobalError");
+    expect(userBoundary?.props.fallback).toBe(UserGlobalError);
+  });
+
+  it("installs the default global error boundary without a user global error", () => {
+    const elements = buildAppPageElements({
+      element: createElement(PageProbe),
+      makeThenableParams: (params) => Promise.resolve(params),
+      matchedParams: {},
+      resolvedMetadata: null,
+      resolvedViewport: {},
+      route: {
+        error: null,
+        errors: [null],
+        layoutTreePositions: [0],
+        layouts: [{ default: RootLayout }],
+        loading: null,
+        notFound: null,
+        notFounds: [null],
+        routeSegments: [],
+        slots: {},
+        templateTreePositions: [],
+        templates: [],
+      },
+      routePath: "/",
+      rootNotFoundModule: null,
+    });
+
+    const outerBoundary = findElementByTypeName(elements["route:/"], "GlobalErrorBoundary");
+    expect(getElementTypeName(outerBoundary?.props.fallback)).toBe("DefaultGlobalError");
+  });
+
   it("interleaves templates with their corresponding layouts", async () => {
     const elements = buildAppPageElements({
       element: createElement(PageProbe),

@@ -1802,11 +1802,13 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
         // (/_next/static/*) were already served above. Middleware response headers
         // (including next.config headers staged by the pipeline) are passed through so
         // Set-Cookie / security headers from middleware are included in the response.
-        serveStaticFile: async (requestPathname, stagedHeaders) => {
+        serveFilesystemRoute: async (requestPathname, stagedHeaders, phase) => {
           if (
+            (req.method !== "GET" && req.method !== "HEAD") ||
             requestPathname === "/" ||
+            requestPathname === "/api" ||
             requestPathname.startsWith("/api/") ||
-            requestPathname.startsWith(`/${ASSET_PREFIX_URL_DIR}/`)
+            (phase === "direct" && requestPathname.startsWith(`/${ASSET_PREFIX_URL_DIR}/`))
           ) {
             return false;
           }
@@ -1825,7 +1827,7 @@ async function startPagesRouterServer(options: PagesRouterServerOptions) {
       const result = await runPagesRequest(webRequest, deps);
 
       if (result.type === "handled") {
-        // serveStaticFile already wrote the response to `res`.
+        // serveFilesystemRoute already wrote the response to `res`.
         return;
       }
 

@@ -58,6 +58,7 @@ import {
 import { buildDefaultPagesNotFoundResponse } from "./pages-default-404.js";
 import { buildPagesReadinessNextData } from "./pages-readiness.js";
 import { resolvePagesPageMethodResponse } from "./pages-page-method.js";
+import { createPagesDevModuleUrl } from "./pages-dev-module-url.js";
 import { isSerializableProps } from "./pages-serializable-props.js";
 import {
   loadUserDocumentInitialProps,
@@ -1200,14 +1201,15 @@ export function createSSRHandler(
                       // Rebuild __NEXT_DATA__ with fresh props. The hydration
                       // script (module URLs) is stable across regenerations —
                       // extract it from the cached HTML to avoid duplication.
-                      const viteRoot = server.config?.root;
-                      const regenPageUrl = viteRoot
-                        ? "/" + path.relative(viteRoot, route.filePath)
-                        : route.filePath;
+                      const viteRoot = server.config.root;
+                      const viteBase = server.config.base;
+                      const regenPageUrl = createPagesDevModuleUrl(
+                        viteRoot,
+                        route.filePath,
+                        viteBase,
+                      );
                       const regenAppUrl = RegenApp
-                        ? viteRoot
-                          ? "/" + path.relative(viteRoot, path.join(pagesDir, "_app"))
-                          : path.join(pagesDir, "_app")
+                        ? createPagesDevModuleUrl(viteRoot, path.join(pagesDir, "_app"), viteBase)
                         : null;
                       const freshPagesNextData = {
                         ...pagesNextData,
@@ -1542,11 +1544,18 @@ export function createSSRHandler(
           fontHeadHTML += `<style data-vinext-fonts${nonceAttr}>${allFontStyles.join("\n")}</style>\n  `;
         }
 
-        // Convert absolute file paths to Vite-servable URLs (relative to root)
+        // Convert absolute file paths to Vite-servable URLs under the dev
+        // server's configured base. Vite rejects root-relative module requests
+        // when basePath config sets server.config.base to a non-root pathname.
         const viteRoot = server.config.root;
-        const pageModuleUrl = "/" + path.relative(viteRoot, route.filePath);
+        const viteBase = server.config.base;
+        const pageModuleUrl = createPagesDevModuleUrl(viteRoot, route.filePath, viteBase);
+        const pageModuleSource = createPagesDevModuleUrl(viteRoot, route.filePath, "/");
         const appModuleUrl = AppComponent
-          ? "/" + path.relative(viteRoot, path.join(pagesDir, "_app"))
+          ? createPagesDevModuleUrl(viteRoot, path.join(pagesDir, "_app"), viteBase)
+          : null;
+        const appModuleSource = AppComponent
+          ? createPagesDevModuleUrl(viteRoot, path.join(pagesDir, "_app"), "/")
           : null;
         const serializedPagesNextData = {
           ...pagesNextData,
@@ -1571,8 +1580,8 @@ const nextData = window.__NEXT_DATA__;
 const props = nextData.props && typeof nextData.props === "object" ? nextData.props : {};
 const rawPageProps = props.pageProps;
 const pageProps = rawPageProps && typeof rawPageProps === "object" ? rawPageProps : {};
-window.__VINEXT_PAGE_LOADERS__ = { [nextData.page]: () => import("${pageModuleUrl}") };
-window.__VINEXT_APP_LOADER__ = ${appModuleUrl ? `() => import("${appModuleUrl}")` : "undefined"};
+window.__VINEXT_PAGE_LOADERS__ = { [nextData.page]: () => import("${pageModuleSource}") };
+window.__VINEXT_APP_LOADER__ = ${appModuleSource ? `() => import("${appModuleSource}")` : "undefined"};
 
 async function hydrate() {
   let hydrateRootOptions;
@@ -1587,13 +1596,13 @@ async function hydrate() {
     };
   }
 
-  const pageModule = await import("${pageModuleUrl}");
+  const pageModule = await import("${pageModuleSource}");
   const PageComponent = pageModule.default;
   let element;
   ${
-    appModuleUrl
+    appModuleSource
       ? `
-  const appModule = await import("${appModuleUrl}");
+  const appModule = await import("${appModuleSource}");
   const AppComponent = appModule.default;
   window.__VINEXT_APP__ = AppComponent;
   element = React.createElement(AppComponent, {

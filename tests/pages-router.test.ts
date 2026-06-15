@@ -6590,6 +6590,10 @@ describe("Pages Router dev ISR regeneration", () => {
         throw new Error(`Unexpected module load: ${id}`);
       };
       const server = {
+        config: {
+          root: FIXTURE_DIR,
+          base: "/docs/",
+        },
         transformIndexHtml: vi.fn(async (_url: string, html: string) => html),
       } as unknown as ViteDevServer;
       const runner = { import: loadModule };
@@ -6671,6 +6675,9 @@ describe("Pages Router dev ISR regeneration", () => {
           },
         },
       });
+      const regeneratedHtml = isrSetSpy.mock.calls[0]?.[1].html as string;
+      expect(regeneratedHtml).toContain('"pageModuleUrl":"/docs/pages/isr-test.tsx"');
+      expect(regeneratedHtml).toContain('"appModuleUrl":"/docs/pages/_app"');
     } finally {
       vi.doUnmock("../packages/vinext/src/server/isr-cache.js");
       vi.resetModules();

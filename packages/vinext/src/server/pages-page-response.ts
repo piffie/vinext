@@ -150,6 +150,7 @@ type RenderPagesPageResponseOptions = {
    */
   enhancePageElement?: ((opts: RenderPageEnhancers) => ReactNode) | undefined;
   DocumentComponent: ComponentType | null;
+  err?: Error;
   flushPreloads?: (() => Promise<void> | void) | undefined;
   fontLinkHeader: string;
   fontPreloads: PagesFontPreload[];
@@ -185,6 +186,7 @@ type RenderPagesPageResponseOptions = {
   pageProps: Record<string, unknown>;
   props?: Record<string, unknown>;
   params: Record<string, unknown>;
+  query?: Record<string, unknown>;
   renderDocumentToString: (element: ReactNode) => Promise<string>;
   renderToReadableStream: (element: ReactNode) => Promise<ReadableStream<Uint8Array>>;
   resetSSRHead?: (() => void) | undefined;
@@ -519,8 +521,9 @@ export async function renderPagesPageResponse(
       readStreamAsText(await options.renderToReadableStream(element)),
     scriptNonce: options.scriptNonce,
     context: {
+      err: options.err,
       pathname: options.routePattern,
-      query: options.params,
+      query: options.query ?? options.params,
       asPath: options.routeUrl,
     },
   });
@@ -553,7 +556,7 @@ export async function renderPagesPageResponse(
   // Fold any head tags returned by `_document.getInitialProps()` into the
   // dedupe pipeline before getSSRHeadHTML serialises the final <head>. Mirrors
   // Next.js's `_document` contract. `runDocumentRenderPage` already invokes
-  // `getInitialProps` for the renderPage contract (rendered/consumed), so reuse
+  // `getInitialProps` for the renderPage contract, so reuse
   // the head it surfaced rather than calling it a second time. Only the
   // `skipped` path (no override, or no `enhancePageElement` wired) falls back to
   // the standalone helper — which itself skips the unmodified default shim.
@@ -582,8 +585,8 @@ export async function renderPagesPageResponse(
     DocumentComponent: options.DocumentComponent,
     renderDocumentToString: options.renderDocumentToString,
     ssrHeadHTML,
-    // When the renderPage path already invoked getInitialProps (rendered or
-    // consumed), reuse its resolved props instead of calling it a second time.
+    // When the renderPage path already invoked getInitialProps, reuse its
+    // resolved props instead of calling it a second time.
     // `skipped` means it was never invoked → fall through to the fast path.
     resolvedDocProps: documentRenderPage.status === "skipped" ? null : documentRenderPage.docProps,
   });

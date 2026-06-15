@@ -208,6 +208,8 @@ async function streamPageToResponse(
      * into `getSSRHeadHTML()`'s output. Called before `getHeadHTML()`.
      */
     setDocumentInitialHead?: (head: React.ReactNode[]) => void;
+    /** Buffer the body before writing headers so error-page fallback remains safe. */
+    bufferBodyBeforeHeaders?: boolean;
   },
 ): Promise<void> {
   const {
@@ -223,6 +225,7 @@ async function streamPageToResponse(
     scriptNonce,
     documentContext,
     setDocumentInitialHead,
+    bufferBodyBeforeHeaders = false,
   } = options;
 
   // Custom `_document.getInitialProps()` may opt in to wrapping the page tree
@@ -260,7 +263,7 @@ async function streamPageToResponse(
   // Fold any head tags returned by `_document.getInitialProps()` into the same
   // dedupe pipeline as user `next/head` tags. Matches Next.js's `_document`
   // contract. `runDocumentRenderPage` already invokes `getInitialProps` for the
-  // renderPage contract (rendered/consumed), so reuse the head it surfaced
+  // renderPage contract, so reuse the head it surfaced
   // rather than calling it a second time. Only the `skipped` path (no override,
   // or no `enhancePageElement` wired) falls back to the standalone helper, which
   // itself skips the unmodified default from vinext's `next/document` shim —
@@ -284,8 +287,8 @@ async function streamPageToResponse(
   let shellTemplate: string;
 
   if (DocumentComponent) {
-    // When the renderPage path already invoked getInitialProps (rendered or
-    // consumed), reuse its resolved props instead of calling it a second time.
+    // When the renderPage path already invoked getInitialProps, reuse its
+    // resolved props instead of calling it a second time.
     // `skipped` means it was never invoked → fall through to the fast path.
     const docProps =
       documentRenderPage.status === "skipped"
@@ -329,6 +332,7 @@ async function streamPageToResponse(
   const markerIdx = transformedShell.indexOf(STREAM_BODY_MARKER);
   const prefix = transformedShell.slice(0, markerIdx);
   const suffix = transformedShell.slice(markerIdx + STREAM_BODY_MARKER.length);
+  const bufferedBody = bufferBodyBeforeHeaders ? await new Response(bodyStream).text() : null;
 
   // Send headers and start streaming.
   // Set array-valued headers (e.g. Set-Cookie from gSSP) via setHeader()
@@ -351,6 +355,11 @@ async function streamPageToResponse(
 
   // Write the document prefix (head, opening body)
   res.write(prefix);
+
+  if (bufferedBody !== null) {
+    res.end(bufferedBody + suffix);
+    return;
+  }
 
   // Pipe the React body stream through (Suspense content streams progressively)
   const reader = bodyStream.getReader();
@@ -1768,6 +1777,7 @@ hydrate();
             typeof headShim.setDocumentInitialHead === "function"
               ? headShim.setDocumentInitialHead
               : undefined,
+          bufferBodyBeforeHeaders: true,
         });
         _renderEnd = now();
 
@@ -1923,24 +1933,7 @@ async function renderErrorPage(
         }
       }
 
-      let element: React.ReactElement;
-      if (AppComponent) {
-        element = createElement(AppComponent, {
-          Component: ErrorComponent,
-          pageProps: errorProps,
-        });
-      } else {
-        element = createElement(ErrorComponent, errorProps);
-      }
-
-      if (wrapFn) {
-        element = wrapFn(element);
-      }
-
-      const bodyHtml = await renderToStringAsync(element);
-
       // Try custom _document
-      let html: string;
       // oxlint-disable-next-line typescript/no-explicit-any
       let DocumentComponent: any = null;
       const docPathErr = path.join(pagesDir, "_document");
@@ -1953,17 +1946,64 @@ async function renderErrorPage(
         }
       }
 
+      const createErrorElement = (
+        // oxlint-disable-next-line typescript/no-explicit-any
+        FinalApp: any,
+        // oxlint-disable-next-line typescript/no-explicit-any
+        FinalComponent: any,
+      ): React.ReactElement => {
+        let errorElement: React.ReactElement = FinalApp
+          ? createElement(FinalApp, {
+              Component: FinalComponent,
+              pageProps: errorProps,
+            })
+          : createElement(FinalComponent, errorProps);
+        if (wrapFn) errorElement = wrapFn(errorElement);
+        return errorElement;
+      };
+
+      const element = createErrorElement(AppComponent, ErrorComponent);
+      const headShim = await importModule(runner, "next/head");
+      if (typeof headShim.resetSSRHead === "function") headShim.resetSSRHead();
+
       if (DocumentComponent) {
-        const docProps = await loadUserDocumentInitialProps(DocumentComponent);
-        const docElement = docProps
-          ? createElement(DocumentComponent, docProps)
-          : createElement(DocumentComponent);
-        let docHtml = await renderToStringAsync(docElement);
-        docHtml = docHtml.replace("__NEXT_MAIN__", bodyHtml);
-        docHtml = docHtml.replace("<!-- __NEXT_SCRIPTS__ -->", "");
-        html = docHtml;
+        const errorPathname = candidate === "_error" ? "/_error" : `/${candidate}`;
+        await streamPageToResponse(res, element, {
+          url,
+          server,
+          fontHeadHTML: "",
+          scripts: "",
+          DocumentComponent,
+          statusCode,
+          documentContext: {
+            err,
+            pathname: errorPathname,
+            query: parseQuery(url),
+            asPath: url,
+            req,
+            res,
+          },
+          enhancePageElement: (renderPageOpts) => {
+            let FinalApp = AppComponent;
+            let FinalComponent = ErrorComponent;
+            if (renderPageOpts.enhanceApp && FinalApp) {
+              FinalApp = renderPageOpts.enhanceApp(FinalApp);
+            }
+            if (renderPageOpts.enhanceComponent) {
+              FinalComponent = renderPageOpts.enhanceComponent(FinalComponent);
+            }
+            return createErrorElement(FinalApp, FinalComponent);
+          },
+          getHeadHTML: () =>
+            typeof headShim.getSSRHeadHTML === "function" ? headShim.getSSRHeadHTML() : "",
+          setDocumentInitialHead:
+            typeof headShim.setDocumentInitialHead === "function"
+              ? headShim.setDocumentInitialHead
+              : undefined,
+        });
       } else {
-        html = `<!DOCTYPE html>
+        const bodyHtml = await renderToStringAsync(element);
+        const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -1973,13 +2013,13 @@ async function renderErrorPage(
   <div id="__next">${bodyHtml}</div>
 </body>
 </html>`;
+        const transformedHtml = await server.transformIndexHtml(url, html);
+        res.writeHead(statusCode, { "Content-Type": "text/html" });
+        res.end(transformedHtml);
       }
-
-      const transformedHtml = await server.transformIndexHtml(url, html);
-      res.writeHead(statusCode, { "Content-Type": "text/html" });
-      res.end(transformedHtml);
       return;
     } catch {
+      if (res.headersSent || res.writableEnded) return;
       // This candidate doesn't exist, try next
       continue;
     }

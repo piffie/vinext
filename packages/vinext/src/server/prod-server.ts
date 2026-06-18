@@ -482,7 +482,6 @@ function sendCompressed(
   };
 
   if (encoding !== "identity" && varyByEncoding && buf.length >= COMPRESS_THRESHOLD) {
-    const compressor = createCompressor(encoding);
     writeHead(
       mergeVaryHeader(
         {
@@ -493,6 +492,14 @@ function sendCompressed(
         "Accept-Encoding",
       ),
     );
+    // HEAD (RFC 9110): emit headers only, no body. Mirrors sendWebResponse.
+    // Returning here also avoids spinning up a compressor for a payload Node
+    // would discard anyway (HEAD bodies are dropped at the socket level).
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    const compressor = createCompressor(encoding);
     compressor.end(buf);
     pipeline(compressor, res, () => {
       /* ignore pipeline errors on closed connections */
@@ -506,6 +513,11 @@ function sendCompressed(
     writeHead(
       varyByEncoding ? mergeVaryHeader(identityHeaders, "Accept-Encoding") : identityHeaders,
     );
+    // HEAD (RFC 9110): emit headers only, no body. Mirrors sendWebResponse.
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     res.end(buf);
   }
 }

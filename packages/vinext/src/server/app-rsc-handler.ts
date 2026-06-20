@@ -65,10 +65,6 @@ import {
   resolveDevImageRedirect,
   type ImageConfig,
 } from "./image-optimization.js";
-import type {
-  MetadataRouteMakeThenableParams,
-  MetadataRuntimeRoute,
-} from "./metadata-route-response.js";
 import { runWithPrerenderWorkUnit } from "./prerender-work-unit-setup.js";
 import { buildPostMwRequestContext } from "./app-post-middleware-context.js";
 import type { AppRscRenderMode } from "./app-rsc-render-mode.js";
@@ -90,9 +86,7 @@ import {
 
 type AppPageParams = Record<string, string | string[]>;
 type RequestContext = ReturnType<typeof requestContextFromRequest>;
-type MetadataRoutes = readonly MetadataRuntimeRoute[];
 const STATIC_METADATA_CONFIG_HEADER_OVERRIDES = new Set(["cache-control"]);
-type MakeThenableParams = MetadataRouteMakeThenableParams;
 type StaticParamsMap = AppPrerenderStaticParamsMap;
 type RootParamNamesMap = AppPrerenderRootParamNamesMap;
 
@@ -296,6 +290,7 @@ type CreateAppRscHandlerOptions<TRoute extends AppRscHandlerRoute> = {
   handleProgressiveActionRequest: (
     options: HandleProgressiveActionRequestOptions,
   ) => Promise<Response | ProgressiveActionFormStateResult | null>;
+  handleMetadataRouteRequest?: (cleanPathname: string) => Promise<Response | null>;
   handleServerActionRequest: (
     options: HandleServerActionRequestOptions,
   ) => Promise<Response | null>;
@@ -303,9 +298,7 @@ type CreateAppRscHandlerOptions<TRoute extends AppRscHandlerRoute> = {
   imageConfig?: ImageConfig;
   isDev: boolean;
   loadPrerenderPagesRoutes?: () => Promise<unknown>;
-  makeThenableParams: MakeThenableParams;
   matchRoute: (pathname: string) => AppRscRouteMatch<TRoute> | null;
-  metadataRoutes: MetadataRoutes;
   runMiddleware?: (options: RunAppMiddlewareOptions) => Promise<ApplyAppMiddlewareResult>;
   publicFiles: ReadonlySet<string>;
   renderNotFound: (options: RenderNotFoundOptions<TRoute>) => Promise<Response | null>;
@@ -657,13 +650,8 @@ async function handleAppRscRequest<TRoute extends AppRscHandlerRoute>(
     return Response.redirect(new URL(imageRedirect, url.origin).href, 302);
   }
 
-  if (options.metadataRoutes.length > 0) {
-    const { handleMetadataRouteRequest } = await import("./metadata-route-response.js");
-    const metadataRouteResponse = await handleMetadataRouteRequest({
-      metadataRoutes: options.metadataRoutes,
-      cleanPathname,
-      makeThenableParams: options.makeThenableParams,
-    });
+  if (options.handleMetadataRouteRequest) {
+    const metadataRouteResponse = await options.handleMetadataRouteRequest(cleanPathname);
     if (metadataRouteResponse) {
       applyConfigHeadersToResponse(metadataRouteResponse.headers, {
         basePathState,

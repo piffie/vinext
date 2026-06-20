@@ -43,6 +43,10 @@ const appRouteHandlerResponsePath = resolveEntryPath(
   import.meta.url,
 );
 const appMiddlewarePath = resolveEntryPath("../server/app-middleware.js", import.meta.url);
+const metadataRouteResponsePath = resolveEntryPath(
+  "../server/metadata-route-response.js",
+  import.meta.url,
+);
 const appServerActionExecutionPath = resolveEntryPath(
   "../server/app-server-action-execution.js",
   import.meta.url,
@@ -293,6 +297,11 @@ ${
 }
 const __loadAppRouteHandlerDispatch = () => import(${JSON.stringify(appRouteHandlerDispatchPath)});
 const __loadAppServerActionExecution = () => import(${JSON.stringify(appServerActionExecutionPath)});
+${
+  (metadataRoutes?.length ?? 0) > 0
+    ? `const __loadMetadataRouteResponse = () => import(${JSON.stringify(metadataRouteResponsePath)});`
+    : ""
+}
 import {
   sanitizeErrorForClient as __sanitizeErrorForClient,
 } from ${JSON.stringify(appRscErrorsPath)};
@@ -1045,9 +1054,20 @@ export default createAppRscHandler({
   },
   i18nConfig: __i18nConfig,
   ${hasPagesDir ? `loadPrerenderPagesRoutes: __loadPrerenderPagesRoutes,` : ""}
-  makeThenableParams,
+  ${
+    (metadataRoutes?.length ?? 0) > 0
+      ? `async handleMetadataRouteRequest(cleanPathname) {
+    const { handleMetadataRouteRequest: __handleMetadataRouteRequest } =
+      await __loadMetadataRouteResponse();
+    return __handleMetadataRouteRequest({
+      metadataRoutes,
+      cleanPathname,
+      makeThenableParams,
+    });
+  },`
+      : ""
+  }
   matchRoute,
-  metadataRoutes,
   ${
     middlewarePath
       ? `runMiddleware({ cleanPathname, context, isDataRequest, request }) {

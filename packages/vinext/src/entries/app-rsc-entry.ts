@@ -22,6 +22,7 @@ import type { AppRoute } from "../routing/app-router.js";
 import { generateDevOriginCheckCode } from "../server/dev-origin-check.js";
 import type { MetadataFileRoute } from "../server/metadata-routes.js";
 import { isProxyFile } from "../server/middleware.js";
+import { DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "../server/image-optimization.js";
 
 const DEFAULT_EXPIRE_TIME = 31_536_000;
 const DEFAULT_REACT_MAX_HEADERS_LENGTH = 6000;
@@ -229,6 +230,17 @@ export function generateRscEntry(
   const hasPagesDir = config?.hasPagesDir ?? false;
   const publicFiles = config?.publicFiles ?? [];
   const draftModeSecret = config?.draftModeSecret ?? randomUUID();
+  const imageAllowedWidths = [
+    ...(config?.imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES),
+    ...(config?.imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES),
+  ];
+  const imageConfig = {
+    qualities: config?.imageConfig?.qualities,
+    dangerouslyAllowSVG: config?.imageConfig?.dangerouslyAllowSVG,
+    dangerouslyAllowLocalIP: config?.imageConfig?.dangerouslyAllowLocalIP,
+    contentDispositionType: config?.imageConfig?.contentDispositionType,
+    contentSecurityPolicy: config?.imageConfig?.contentSecurityPolicy,
+  };
   const manifestCode = buildAppRscManifestCode({
     routes,
     metadataRoutes,
@@ -622,7 +634,7 @@ const __i18nConfig = ${JSON.stringify(i18nConfig)};
 const __configRedirects = ${JSON.stringify(redirects)};
 const __configRewrites = ${JSON.stringify(rewrites)};
 const __configHeaders = ${JSON.stringify(headers)};
-const __imageConfig = ${JSON.stringify(config?.imageConfig)};
+const __runtimeImageConfig = ${JSON.stringify(config?.imageConfig)};
 const __publicFiles = new Set(${JSON.stringify(publicFiles)});
 const __allowedOrigins = ${JSON.stringify(allowedOrigins)};
 const __expireTime = ${JSON.stringify(expireTime)};
@@ -633,6 +645,8 @@ const __reactMaxHeadersLength = ${JSON.stringify(reactMaxHeadersLength)};
 // mirrors the embedded \`__basePath\` pattern (and Pages Router's
 // \`vinextConfig\` export). Empty string when unset.
 export const __assetPrefix = ${JSON.stringify(assetPrefix)};
+export const __imageAllowedWidths = ${JSON.stringify(imageAllowedWidths)};
+export const __imageConfig = ${JSON.stringify(imageConfig)};
 export const __inlineCss = ${JSON.stringify(inlineCss)};
 export const __hasPagesDir = ${JSON.stringify(hasPagesDir)};
 export const getRenderedConcreteUrlPathsForRoute = __getRenderedConcreteUrlPathsForRoute;
@@ -699,7 +713,7 @@ export default createAppRscHandler({
   }
   configRedirects: __configRedirects,
   configRewrites: __configRewrites,
-  imageConfig: __imageConfig,
+  imageConfig: __runtimeImageConfig,
   isDev: process.env.NODE_ENV !== "production",
   draftModeSecret: __draftModeSecret,
   dispatchMatchedPage({

@@ -22,10 +22,19 @@ import "./server-globals.js";
 import rscHandler, {
   __assetPrefix as __rscAssetPrefix,
   __basePath as __rscBasePath,
+  __imageAllowedWidths as __rscImageAllowedWidths,
+  __imageConfig as __rscImageConfig,
 } from "virtual:vinext-rsc-entry";
 import { runWithExecutionContext, type ExecutionContextLike } from "vinext/shims/request-context";
 // @ts-expect-error -- virtual module resolved by vinext at build time
 import { registerConfiguredCacheAdapters } from "virtual:vinext-cache-adapters";
+// @ts-expect-error -- virtual module resolved by vinext at build time
+import { registerConfiguredImageOptimizer } from "virtual:vinext-image-adapters";
+import {
+  getImageOptimizer,
+  handleConfiguredImageOptimization,
+  isImageOptimizationPath,
+} from "./image-optimization.js";
 import { finalizeMissingStaticAssetResponse, resolveStaticAssetSignal } from "./worker-utils.js";
 import {
   cloneRequestWithHeaders,
@@ -75,8 +84,20 @@ async function handleRequest(
 ): Promise<Response> {
   // Register config-driven cache adapters before any rendering touches the cache.
   registerConfiguredCacheAdapters(env as Record<string, unknown> | undefined);
+  registerConfiguredImageOptimizer(env as Record<string, unknown> | undefined);
 
   const url = new URL(request.url);
+
+  if (isImageOptimizationPath(url.pathname) && env?.ASSETS && getImageOptimizer()) {
+    const assetFetcher = env.ASSETS;
+    return handleConfiguredImageOptimization(
+      request,
+      (assetPath) =>
+        Promise.resolve(assetFetcher.fetch(new Request(new URL(assetPath, request.url)))),
+      __rscImageAllowedWidths,
+      __rscImageConfig,
+    );
+  }
 
   // Block protocol-relative URL open redirects (//evil.com/, /\evil.com/,
   // /%5Cevil.com/, /%2F/evil.com/). Check BEFORE decode so both literal and

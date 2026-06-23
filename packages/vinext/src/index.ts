@@ -49,6 +49,11 @@ import {
   type VinextCacheConfig,
 } from "./cache/cache-adapters-virtual.js";
 import {
+  VIRTUAL_IMAGE_ADAPTERS,
+  generateImageAdaptersModule,
+  type VinextImageConfig,
+} from "./image/image-adapters-virtual.js";
+import {
   generateBrowserEntry,
   isLinkPrefetchRoute,
   toDocumentOnlyAppRoute,
@@ -571,6 +576,8 @@ const VIRTUAL_ROOT_PARAMS = "virtual:vinext-root-params";
 const RESOLVED_ROOT_PARAMS = VIRTUAL_PREFIX + VIRTUAL_ROOT_PARAMS;
 /** Virtual module that registers config-driven cache adapters (see VinextOptions.cache). */
 const RESOLVED_CACHE_ADAPTERS = VIRTUAL_PREFIX + VIRTUAL_CACHE_ADAPTERS;
+/** Virtual module that registers the config-driven image optimizer (see VinextOptions.images). */
+const RESOLVED_IMAGE_ADAPTERS = VIRTUAL_PREFIX + VIRTUAL_IMAGE_ADAPTERS;
 /** Virtual module for composed instrumentation-client bootstrap. */
 const VIRTUAL_INSTRUMENTATION_CLIENT = "private-next-instrumentation-client";
 const RESOLVED_INSTRUMENTATION_CLIENT = `${VIRTUAL_PREFIX}${VIRTUAL_INSTRUMENTATION_CLIENT}.mjs`;
@@ -830,6 +837,17 @@ export type VinextOptions = {
    * })
    */
   cache?: VinextCacheConfig;
+  /**
+   * Configure the server-side image optimizer declaratively. The adapter factory
+   * receives the host `env`, allowing bindings such as Cloudflare Images to be
+   * used by both built-in and custom worker entrypoints that forward `env`.
+   *
+   * @example
+   * import { imageAdapter } from "@vinext/cloudflare/images/images-optimizer";
+   *
+   * vinext({ images: { optimizer: imageAdapter() } })
+   */
+  images?: VinextImageConfig;
   /**
    * Experimental vinext-only feature flags.
    */
@@ -2817,6 +2835,12 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           ) {
             return RESOLVED_CACHE_ADAPTERS;
           }
+          if (
+            cleanId === VIRTUAL_IMAGE_ADAPTERS ||
+            cleanId.endsWith("/" + VIRTUAL_IMAGE_ADAPTERS)
+          ) {
+            return RESOLVED_IMAGE_ADAPTERS;
+          }
           if (cleanId.startsWith(VIRTUAL_GOOGLE_FONTS + "?")) {
             return RESOLVED_VIRTUAL_GOOGLE_FONTS + cleanId.slice(VIRTUAL_GOOGLE_FONTS.length);
           }
@@ -2911,6 +2935,10 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                 deviceSizes: nextConfig?.images?.deviceSizes,
                 imageSizes: nextConfig?.images?.imageSizes,
                 qualities: nextConfig?.images?.qualities,
+                dangerouslyAllowSVG: nextConfig?.images?.dangerouslyAllowSVG,
+                dangerouslyAllowLocalIP: nextConfig?.images?.dangerouslyAllowLocalIP,
+                contentDispositionType: nextConfig?.images?.contentDispositionType,
+                contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
               },
               hasPagesDir,
               publicFiles: scanPublicFileRoutes(root),
@@ -2928,6 +2956,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
         }
         if (id === RESOLVED_CACHE_ADAPTERS) {
           return generateCacheAdaptersModule(options.cache);
+        }
+        if (id === RESOLVED_IMAGE_ADAPTERS) {
+          return generateImageAdaptersModule(options.images);
         }
         if (id === RESOLVED_APP_SSR_ENTRY && hasAppDir) {
           return generateSsrEntry(hasPagesDir);
@@ -5079,33 +5110,6 @@ export const loadServerActionClient = ${
     // The App Router RSC entry doesn't export vinextConfig (that's a Pages
     // Router pattern), so we write a separate JSON file at build time that
     // prod-server.ts reads at startup for SVG/security header config.
-    {
-      name: "vinext:image-config",
-      apply: "build",
-      enforce: "post",
-      writeBundle: {
-        sequential: true,
-        order: "post",
-        handler(options) {
-          const envName = this.environment?.name;
-          if (envName !== "rsc") return;
-
-          const outDir = options.dir;
-          if (!outDir) return;
-
-          const imageConfig = {
-            deviceSizes: nextConfig?.images?.deviceSizes,
-            imageSizes: nextConfig?.images?.imageSizes,
-            qualities: nextConfig?.images?.qualities,
-            dangerouslyAllowSVG: nextConfig?.images?.dangerouslyAllowSVG,
-            contentDispositionType: nextConfig?.images?.contentDispositionType,
-            contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
-          };
-
-          fs.writeFileSync(path.join(outDir, "image-config.json"), JSON.stringify(imageConfig));
-        },
-      },
-    },
     // Write BUILD_ID to dist/server/ so post-build tools (TPR, seed-cache) can
     // read the build identifier without depending on the prerender manifest.
     // Uses writeBundle (not closeBundle) with a one-time write guard so the file
@@ -5115,8 +5119,7 @@ export const loadServerActionClient = ${
     // closeBundle does not fire reliably during the multi-environment
     // createBuilder().buildApp() pipeline used for App Router production builds,
     // so the file was silently never written for pure App Router apps. writeBundle
-    // fires for every emitted bundle (matching the vinext:image-config plugin
-    // above), so the guard captures the first one. The path is always
+    // fires for every emitted bundle, so the guard captures the first one. The path is always
     // dist/server/BUILD_ID — derived from root, not from the per-environment
     // options.dir — so it works for all router types.
     (() => {

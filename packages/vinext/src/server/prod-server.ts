@@ -1189,18 +1189,6 @@ function installPagesClientAssetGlobals(options: {
 async function startAppRouterServer(options: AppRouterServerOptions) {
   const { port, host, clientDir, rscEntryPath, compress, purpose } = options;
 
-  // Load image config written at build time by vinext:image-config plugin.
-  // This provides SVG/security header settings for the image optimization endpoint.
-  let imageConfig: ImageConfig | undefined;
-  const imageConfigPath = path.join(path.dirname(rscEntryPath), "image-config.json");
-  if (fs.existsSync(imageConfigPath)) {
-    try {
-      imageConfig = JSON.parse(fs.readFileSync(imageConfigPath, "utf-8"));
-    } catch {
-      /* ignore parse errors */
-    }
-  }
-
   // Load prerender secret written at build time by vinext:server-manifest plugin.
   // Used to authenticate internal /__vinext/prerender/* HTTP endpoints.
   const prerenderSecret = readPrerenderSecret(path.dirname(rscEntryPath));
@@ -1224,6 +1212,23 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     typeof rscModule.__basePath === "string" ? rscModule.__basePath : "";
   const appRouterInlineCss = rscModule.__inlineCss === true;
   const appRouterHasPagesDir = rscModule.__hasPagesDir === true;
+  const appImageAllowedWidths: number[] = Array.isArray(rscModule.__imageAllowedWidths)
+    ? rscModule.__imageAllowedWidths
+    : [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
+  let imageConfig: ImageConfig | undefined =
+    typeof rscModule.__imageConfig === "object" && rscModule.__imageConfig !== null
+      ? (rscModule.__imageConfig as ImageConfig)
+      : undefined;
+  if (imageConfig === undefined) {
+    const imageConfigPath = path.join(path.dirname(rscEntryPath), "image-config.json");
+    if (fs.existsSync(imageConfigPath)) {
+      try {
+        imageConfig = JSON.parse(fs.readFileSync(imageConfigPath, "utf-8"));
+      } catch {
+        /* Older or malformed build sidecar: fall back to defaults. */
+      }
+    }
+  }
   globalThis.__VINEXT_INLINE_CSS__ = appRouterInlineCss
     ? collectInlineCssManifest(clientDir, appRouterAssetPrefix)
     : undefined;
@@ -1341,11 +1346,7 @@ async function startAppRouterServer(options: AppRouterServerOptions) {
     // serves the original file with cache headers and security headers)
     if (isImageOptimizationPath(pathname)) {
       const parsedUrl = new URL(rawUrl, "http://localhost");
-      const allowedWidths = [
-        ...(imageConfig?.deviceSizes ?? DEFAULT_DEVICE_SIZES),
-        ...(imageConfig?.imageSizes ?? DEFAULT_IMAGE_SIZES),
-      ];
-      const params = parseImageParams(parsedUrl, allowedWidths, imageConfig?.qualities);
+      const params = parseImageParams(parsedUrl, appImageAllowedWidths, imageConfig?.qualities);
       if (!params) {
         res.writeHead(400);
         res.end("Bad Request");

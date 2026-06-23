@@ -183,7 +183,11 @@ const CONFIG_SUPPORT: Record<string, { status: Status; detail?: string }> = {
   headers: { status: "supported" },
   i18n: { status: "supported", detail: "path-prefix routing; domain routing for Pages Router" },
   env: { status: "supported" },
-  images: { status: "partial", detail: "remotePatterns validated, no local optimization" },
+  images: {
+    status: "partial",
+    detail:
+      "remotePatterns validated; on-the-fly optimization via images.optimizer (Cloudflare Images), passthrough otherwise",
+  },
   allowedDevOrigins: { status: "supported", detail: "dev server cross-origin allowlist" },
   output: {
     status: "supported",

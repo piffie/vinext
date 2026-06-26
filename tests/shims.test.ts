@@ -12023,6 +12023,17 @@ describe("next/form shim", () => {
     expect(typeof mod.useActionState).toBe("function");
   });
 
+  it("prefetches the App Router loading shell for form navigation", async () => {
+    const source = await readFile(
+      path.resolve(import.meta.dirname, "../packages/vinext/src/shims/form.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("renderMode: APP_RSC_RENDER_MODE_PREFETCH_LOADING_SHELL");
+    expect(source).toContain("cacheForNavigation: false");
+    expect(source).toContain("optimisticRouteShell: true");
+  });
+
   it("renders a form element with string action in SSR", async () => {
     const React = await import("react");
     const { renderToStaticMarkup } = await import("react-dom/server");
@@ -12095,6 +12106,40 @@ describe("next/form shim", () => {
     );
     expect(html).toContain('class="search-form"');
     expect(html).toContain('id="main-search"');
+  });
+
+  it("preserves the absolute form target so basePath normalization runs once", async () => {
+    const previousWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      writable: true,
+      value: { location: { href: "https://example.com/base/forms/basic" } },
+    });
+
+    try {
+      const { createFormSubmitDestinationUrl } =
+        await import("../packages/vinext/src/shims/form.js");
+      const formData = new FormData();
+      formData.set("query", "my search");
+      const form = {} as HTMLFormElement;
+      const formDataSpy = vi
+        .spyOn(globalThis, "FormData")
+        .mockImplementation(function MockFormData() {
+          return formData;
+        } as unknown as typeof FormData);
+
+      expect(createFormSubmitDestinationUrl("/base/search", form, null)).toBe(
+        "https://example.com/base/search?query=my+search",
+      );
+
+      formDataSpy.mockRestore();
+    } finally {
+      if (previousWindowDescriptor) {
+        Object.defineProperty(globalThis, "window", previousWindowDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "window");
+      }
+    }
   });
 });
 

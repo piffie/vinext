@@ -2920,7 +2920,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           // route-miss 404. The file is responsible for emitting its own
           // <html> and <body> tags (similar to global-error.tsx).
           // See https://github.com/vercel/next.js/blob/canary/test/e2e/app-dir/global-not-found
-          const globalNotFoundPath = findFileWithExts(appDir, "global-not-found", fileMatcher);
+          const globalNotFoundPath = nextConfig?.globalNotFound
+            ? findFileWithExts(appDir, "global-not-found", fileMatcher)
+            : null;
           // Collect Layer 1 (segment config) classifications for all layouts.
           // Layer 2 (module graph) runs later in renderChunk once Rollup's
           // module info is available.
@@ -2952,6 +2954,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
               reactMaxHeadersLength: nextConfig?.reactMaxHeadersLength,
               cacheMaxMemorySize: nextConfig?.cacheMaxMemorySize,
               inlineCss: nextConfig?.inlineCss,
+              globalNotFound: nextConfig?.globalNotFound,
               cacheComponents: nextConfig?.cacheComponents,
               hasServerActions,
               i18n: nextConfig?.i18n,

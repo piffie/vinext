@@ -421,7 +421,7 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
           { AppElementsWire },
           rscCacheBusting,
           { APP_RSC_RENDER_MODE_PREFETCH_LOADING_SHELL },
-          { VINEXT_MOUNTED_SLOTS_HEADER },
+          headersModule,
           { resolveHybridClientRouteOwner },
         ] = await Promise.all([
           import("./navigation.js"),
@@ -438,8 +438,11 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
           getMountedSlotsHeader,
           hasPrefetchCacheEntryForNavigation,
           prefetchRscResponse,
+          DYNAMIC_NAVIGATION_CACHE_TTL,
+          PREFETCH_CACHE_TTL,
         } = navigation;
         const { createRscRequestHeaders, createRscRequestUrl } = rscCacheBusting;
+        const { NEXT_ROUTER_PREFETCH_HEADER, VINEXT_MOUNTED_SLOTS_HEADER } = headersModule;
         // Hybrid ownership: skip the App RSC prefetch when Pages owns the
         // URL. The App's `__VINEXT_LINK_PREFETCH_ROUTES__` may include an
         // App catch-all that also matches the same path, so a naive
@@ -469,6 +472,9 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
         });
         if (mountedSlotsHeader) {
           headers.set(VINEXT_MOUNTED_SLOTS_HEADER, mountedSlotsHeader);
+        }
+        if (isOptimisticRouteShellPrefetch) {
+          headers.set(NEXT_ROUTER_PREFETCH_HEADER, "1");
         }
         // Distinguish the same visible URL when it is prefetched from different
         // request contexts such as /feed vs /gallery or different mounted slots.
@@ -544,6 +550,7 @@ function prefetchUrl(href: string, mode: LinkPrefetchMode, priority: "low" | "hi
           undefined,
           {
             cacheForNavigation: autoPrefetch.cacheForNavigation,
+            fallbackTtlMs: mode === "full" ? PREFETCH_CACHE_TTL : DYNAMIC_NAVIGATION_CACHE_TTL,
             optimisticRouteShell: isOptimisticRouteShellPrefetch,
           },
         );

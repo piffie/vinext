@@ -3434,6 +3434,87 @@ describe("next/router withRouter HOC", () => {
   });
 });
 
+// reactStrictMode (Pages Router). The <React.StrictMode> wrap lives in
+// `wrapWithRouterContext`, the single seam every render path funnels through:
+// the initial hydration entry AND every client-side navigation `root.render()`
+// (`renderPagesRouterElement` in shims/router.ts). This mirrors Next.js, whose
+// `doRender` closure wraps in <React.StrictMode> for both the initial hydrate
+// and subsequent `reactRoot.render()` calls (client/index.tsx ~787). The wrap
+// is gated on a client-only `window.__VINEXT_REACT_STRICT_MODE__` flag so the
+// server-rendered tree is never wrapped (Next.js wraps client-side only).
+describe("next/router wrapWithRouterContext reactStrictMode wrap", () => {
+  let previousWindow: unknown;
+
+  // Recursively search a React element tree for a node whose type is
+  // React.StrictMode.
+  function treeContainsStrictMode(node: unknown, StrictMode: unknown): boolean {
+    if (!node || typeof node !== "object") return false;
+    const el = node as { type?: unknown; props?: { children?: unknown } };
+    if (el.type === StrictMode) return true;
+    const children = el.props?.children;
+    if (Array.isArray(children)) {
+      return children.some((child) => treeContainsStrictMode(child, StrictMode));
+    }
+    return treeContainsStrictMode(children, StrictMode);
+  }
+
+  beforeEach(() => {
+    previousWindow = (globalThis as any).window;
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    if (previousWindow === undefined) {
+      delete (globalThis as any).window;
+    } else {
+      (globalThis as any).window = previousWindow;
+    }
+    vi.resetModules();
+  });
+
+  it("wraps the router-context tree in React.StrictMode when the client flag is true", async () => {
+    (globalThis as any).window = {
+      __VINEXT_REACT_STRICT_MODE__: true,
+      location: { pathname: "/", search: "", hash: "", href: "http://localhost/" },
+      history: { state: null, pushState() {}, replaceState() {} },
+      addEventListener() {},
+    };
+    const React = await import("react");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const tree = wrapWithRouterContext(React.createElement("span", null, "ok"));
+    expect(treeContainsStrictMode(tree, React.StrictMode)).toBe(true);
+  });
+
+  it("does not wrap in React.StrictMode when the client flag is false or unset", async () => {
+    const baseWindow = {
+      location: { pathname: "/", search: "", hash: "", href: "http://localhost/" },
+      history: { state: null, pushState() {}, replaceState() {} },
+      addEventListener() {},
+    };
+    (globalThis as any).window = { ...baseWindow, __VINEXT_REACT_STRICT_MODE__: false };
+    const React = await import("react");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const falseTree = wrapWithRouterContext(React.createElement("span", null, "ok"));
+    expect(treeContainsStrictMode(falseTree, React.StrictMode)).toBe(false);
+
+    // Unset flag → also no wrap.
+    (globalThis as any).window = { ...baseWindow };
+    const unsetTree = wrapWithRouterContext(React.createElement("span", null, "ok"));
+    expect(treeContainsStrictMode(unsetTree, React.StrictMode)).toBe(false);
+  });
+
+  it("never wraps in React.StrictMode on the server (no window), matching Next.js", async () => {
+    delete (globalThis as any).window;
+    const React = await import("react");
+    const { wrapWithRouterContext } = await import("../packages/vinext/src/shims/router.js");
+
+    const tree = wrapWithRouterContext(React.createElement("span", null, "ok"));
+    expect(treeContainsStrictMode(tree, React.StrictMode)).toBe(false);
+  });
+});
+
 describe("next/headers shim", () => {
   it("exports cookies, headers, draftMode", async () => {
     const mod = await import("../packages/vinext/src/shims/headers.js");
@@ -14619,6 +14700,7 @@ describe("Pages Router concurrent navigation", () => {
       __VINEXT_LOCALE__: undefined as string | undefined,
       __VINEXT_LOCALES__: undefined as string[] | undefined,
       __VINEXT_DEFAULT_LOCALE__: undefined as string | undefined,
+      __VINEXT_REACT_STRICT_MODE__: undefined as boolean | undefined,
     };
 
     // Make pushState update location to simulate real browser behavior
@@ -14721,6 +14803,47 @@ describe("Pages Router concurrent navigation", () => {
     });
     return { promise, resolve, reject };
   }
+
+  function treeContainsReactType(node: unknown, type: unknown): boolean {
+    if (!node || typeof node !== "object") return false;
+    const el = node as { type?: unknown; props?: { children?: unknown } };
+    if (el.type === type) return true;
+    const children = el.props?.children;
+    if (Array.isArray(children))
+      return children.some((child) => treeContainsReactType(child, type));
+    return treeContainsReactType(children, type);
+  }
+
+  it("keeps reactStrictMode wrapping on client navigation renders", async () => {
+    const previousWindow = (globalThis as any).window;
+    const originalFetch = globalThis.fetch;
+    const React = await import("react");
+    const { win, render } = createNavWindow();
+    const pageModuleUrl = fixtureModuleUrl("fixtures/client-navigation-page.tsx");
+    win.__VINEXT_REACT_STRICT_MODE__ = true;
+    (globalThis as any).window = win;
+    globalThis.fetch = vi.fn(
+      async () => new Response(buildNavHtml("/next", pageModuleUrl), { status: 200 }),
+    );
+
+    try {
+      vi.resetModules();
+      const { default: Router } = await import("../packages/vinext/src/shims/router.js");
+
+      await expect(Router.push("/next")).resolves.toBe(true);
+
+      expect(render).toHaveBeenCalledTimes(1);
+      expect(treeContainsReactType(render.mock.calls[0]?.[0], React.StrictMode)).toBe(true);
+    } finally {
+      vi.resetModules();
+      if (previousWindow === undefined) {
+        delete (globalThis as any).window;
+      } else {
+        (globalThis as any).window = previousWindow;
+      }
+      globalThis.fetch = originalFetch;
+    }
+  });
 
   it("preserves cross-origin domain-locale targets during query-only same-segment navigation", async () => {
     const previousWindow = (globalThis as any).window;

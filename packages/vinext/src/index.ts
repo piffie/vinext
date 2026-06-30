@@ -433,6 +433,11 @@ function isScriptModuleId(id: string): boolean {
   return SCRIPT_IMPORT_RE.test(stripViteModuleQuery(id).toLowerCase());
 }
 
+function skipCommonjsForLocalCjs(id: string): false | undefined {
+  const cleanId = normalizePathSeparators(stripViteModuleQuery(id));
+  return /\.c[jt]s$/i.test(cleanId) && !cleanId.includes("node_modules") ? false : undefined;
+}
+
 function hasOnlyTypeSpecifiers(statement: AstStaticDependencyDeclaration): boolean {
   return (
     statement.specifiers !== undefined &&
@@ -1429,7 +1434,21 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
     createIgnoreDynamicRequestsPlugin(() => nextConfig?.turbopackTranspilePackages ?? []),
     // Transform CJS require()/module.exports to ESM before other plugins
     // analyze imports (RSC directive scanning, shim resolution, etc.)
-    commonjs(),
+    //
+    // Skip project-local `.cjs`/`.cts` files. `vinext init` renames CJS config
+    // files to `.cjs` (e.g. `tailwind.config.js` → `tailwind.config.cjs`) when
+    // it adds `"type": "module"`, and app code imports them extensionlessly
+    // (`import cfg from "../tailwind.config"`). If `vite-plugin-commonjs`
+    // rewrites their `module.exports` to ESM `export {}`, rolldown still infers
+    // `moduleType: "cjs"` from the `.cjs`/`.cts` extension and re-parses the
+    // rewritten output as CommonJS, failing with "Cannot use export statement
+    // outside a module". Returning `false` makes vite-plugin-commonjs skip these
+    // project-local files so rolldown's own CJS interop bundles them instead.
+    // For everything else we return `undefined` to preserve the plugin's
+    // defaults — including its existing skip of node_modules `.cjs` files.
+    commonjs({
+      filter: skipCommonjsForLocalCjs,
+    }),
     // Enable JSX in plain .js files. Next.js allows JSX in .js files
     // (Babel/SWC handle it transparently), but Vite 8's built-in `vite:oxc`
     // plugin excludes .js files by default (`exclude: /\.js$/`) AND infers
@@ -2930,6 +2949,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
 
         const configuredExtensions =
           name === "client" ? nextConfig.resolveExtensions : nextConfig.serverResolveExtensions;
+        // Explicit resolver extensions replace vinext's defaults, matching
+        // Next.js/Turbopack semantics; callers who override them must include
+        // `.cjs`/`.cts` if they need extensionless imports of CJS config files.
         const extensions =
           configuredExtensions === null
             ? buildViteResolveExtensions(nextConfig.pageExtensions, config.resolve?.extensions)

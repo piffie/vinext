@@ -375,6 +375,129 @@ function toRelativeFileEntry(root: string, absPath: string): string {
   return path.relative(root, absPath).split(path.sep).join("/");
 }
 
+const DEV_PAGES_CLIENT_ENTRY = "/@id/__x00__virtual:vinext-client-entry";
+const STYLESHEET_IMPORT_RE = /\.(?:css|scss|sass)$/i;
+const STYLESHEET_FILE_RE = /\.(?:css|scss|sass)$/i;
+const SCRIPT_IMPORT_RE = /\.(?:[cm]?[jt]sx?)$/i;
+
+type ResolveFromImporter = (
+  id: string,
+  importer?: string,
+  options?: { skipSelf?: boolean },
+) => Promise<{ id: string } | null | undefined>;
+
+type AstStaticDependencyDeclaration = ASTNode & {
+  type?: string;
+  importKind?: string;
+  exportKind?: string;
+  source?: { value?: unknown };
+  specifiers?: Array<{ importKind?: string; exportKind?: string }>;
+  attributes?: unknown[];
+};
+
+function parserLanguageForScript(id: string): "ts" | "tsx" {
+  const cleanId = stripViteModuleQuery(id).toLowerCase();
+  return cleanId.endsWith(".ts") || cleanId.endsWith(".mts") || cleanId.endsWith(".cts")
+    ? "ts"
+    : "tsx";
+}
+
+function isStylesheetSpecifier(specifier: string): boolean {
+  if (specifier.includes("?") || specifier.includes("#")) return false;
+  return STYLESHEET_IMPORT_RE.test(specifier.toLowerCase());
+}
+
+function isScriptModuleId(id: string): boolean {
+  return SCRIPT_IMPORT_RE.test(stripViteModuleQuery(id).toLowerCase());
+}
+
+function hasOnlyTypeSpecifiers(statement: AstStaticDependencyDeclaration): boolean {
+  return (
+    statement.specifiers !== undefined &&
+    statement.specifiers.length > 0 &&
+    statement.specifiers.every(
+      (specifier) => specifier.importKind === "type" || specifier.exportKind === "type",
+    )
+  );
+}
+
+function resolvedStylesheetToDevManifestAsset(root: string, resolvedId: string): string | null {
+  const cleanId = stripViteModuleQuery(resolvedId);
+  if (!path.isAbsolute(cleanId)) return null;
+
+  const rootForRelative = tryRealpathSync(root) ?? root;
+  const fileForRelative = tryRealpathSync(cleanId) ?? cleanId;
+  const relativePath = path.relative(rootForRelative, fileForRelative);
+  if (relativePath !== "" && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+    return normalizePathSeparators(relativePath);
+  }
+
+  const normalized = normalizePathSeparators(cleanId);
+  return `@fs/${normalized.replace(/^\/+/, "")}`;
+}
+
+async function collectDevPagesAppStylesheetAssets(
+  root: string,
+  appFilePath: string,
+  resolve: ResolveFromImporter,
+): Promise<string[]> {
+  const stylesheetAssets: string[] = [];
+  const seenAssets = new Set<string>();
+  const seenModules = new Set<string>();
+
+  async function visitModule(modulePath: string): Promise<void> {
+    const cleanModulePath = stripViteModuleQuery(modulePath);
+    if (!path.isAbsolute(cleanModulePath) || !fs.existsSync(cleanModulePath)) return;
+    if (seenModules.has(cleanModulePath)) return;
+    seenModules.add(cleanModulePath);
+
+    let ast: ReturnType<typeof parseAst>;
+    try {
+      ast = parseAst(fs.readFileSync(cleanModulePath, "utf-8"), {
+        lang: parserLanguageForScript(cleanModulePath),
+      });
+    } catch {
+      return;
+    }
+
+    for (const statement of ast.body as AstStaticDependencyDeclaration[]) {
+      if (
+        statement.type !== "ImportDeclaration" &&
+        statement.type !== "ExportNamedDeclaration" &&
+        statement.type !== "ExportAllDeclaration"
+      ) {
+        continue;
+      }
+      if (statement.importKind === "type") continue;
+      if (statement.exportKind === "type") continue;
+      if (hasOnlyTypeSpecifiers(statement)) continue;
+      if (statement.attributes && statement.attributes.length > 0) continue;
+
+      const specifier = statement.source?.value;
+      if (typeof specifier !== "string") continue;
+
+      const resolved = await resolve(specifier, cleanModulePath, { skipSelf: true });
+      if (!resolved?.id) continue;
+
+      if (isStylesheetSpecifier(specifier)) {
+        const asset = resolvedStylesheetToDevManifestAsset(root, resolved.id);
+        if (!asset || seenAssets.has(asset)) continue;
+        seenAssets.add(asset);
+        stylesheetAssets.push(asset);
+        continue;
+      }
+
+      if (specifier.includes("?") || specifier.includes("#")) continue;
+      if (isScriptModuleId(resolved.id)) {
+        await visitModule(resolved.id);
+      }
+    }
+  }
+
+  await visitModule(appFilePath);
+  return stylesheetAssets;
+}
+
 const TSCONFIG_FILES = ["tsconfig.json", "jsconfig.json"];
 
 function resolveTsconfigPathCandidate(candidate: string): string | null {
@@ -2856,7 +2979,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
       },
 
       resolveId: {
-        // Hook filter: only invoke JS for handled Next/Vinext compatibility modules.
+        // Hook filter: only invoke JS for handled compatibility modules.
         // Matches "next/navigation", "next/router.js", "virtual:vinext-rsc-entry",
         // direct @vercel/og imports in metadata routes, and \0-prefixed
         // re-imports from @vitejs/plugin-rsc.
@@ -2985,7 +3108,29 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           return await generateClientEntry();
         }
         if (id === RESOLVED_PAGES_CLIENT_ASSETS) {
-          return "export default { clientEntry: '/@id/__x00__virtual:vinext-client-entry' };";
+          const metadata: {
+            clientEntry: string;
+            ssrManifest?: Record<string, string[]>;
+          } = { clientEntry: DEV_PAGES_CLIENT_ENTRY };
+          const ssrManifest: Record<string, string[]> = {};
+          const appFilePath = findFileWithExts(pagesDir, "_app", fileMatcher);
+          const pagesRoutes = await pagesRouter(pagesDir, nextConfig?.pageExtensions, fileMatcher);
+          const moduleFilePaths = [
+            ...(appFilePath ? [appFilePath] : []),
+            ...pagesRoutes.map((route) => route.filePath),
+          ];
+          for (const moduleFilePath of moduleFilePaths) {
+            const stylesheetAssets = await collectDevPagesAppStylesheetAssets(
+              root,
+              moduleFilePath,
+              this.resolve.bind(this),
+            );
+            if (stylesheetAssets.length > 0) {
+              ssrManifest[normalizePathSeparators(moduleFilePath)] = stylesheetAssets;
+            }
+          }
+          if (Object.keys(ssrManifest).length > 0) metadata.ssrManifest = ssrManifest;
+          return `export default ${JSON.stringify(metadata)};`;
         }
         // App Router virtual modules
         if (id === RESOLVED_RSC_ENTRY && hasAppDir) {
@@ -3481,7 +3626,45 @@ export const loadServerActionClient = ${
       // sending full-reload ensures changes are always reflected in
       // the browser.
       hotUpdate(options: { file: string; server: ViteDevServer; modules: unknown[] }) {
-        if (!hasPagesDir || hasAppDir) return;
+        if (!hasPagesDir) return;
+        const isPagesAppFile = (filePath: string): boolean => {
+          const relativePath = normalizePathSeparators(path.relative(pagesDir, filePath));
+          return (
+            !relativePath.includes("/") &&
+            relativePath.startsWith("_app.") &&
+            fileMatcher.extensionRegex.test(filePath)
+          );
+        };
+        const isPotentialPagesAssetGraphScript = (filePath: string): boolean => {
+          const cleanPath = stripViteModuleQuery(filePath);
+          if (!path.isAbsolute(cleanPath)) return false;
+          if (!isScriptModuleId(cleanPath) || cleanPath.endsWith(".d.ts")) return false;
+          const relativeRootPath = normalizePathSeparators(path.relative(root, cleanPath));
+          if (relativeRootPath.startsWith("..") || path.isAbsolute(relativeRootPath)) return false;
+          if (
+            relativeRootPath.includes("/node_modules/") ||
+            relativeRootPath.startsWith("node_modules/")
+          ) {
+            return false;
+          }
+          const relativeAppPath = normalizePathSeparators(path.relative(appDir, cleanPath));
+          return relativeAppPath.startsWith("..") || path.isAbsolute(relativeAppPath);
+        };
+        const pagesAppChanged = isPagesAppFile(options.file);
+        const pagesAssetGraphScriptChanged = isPotentialPagesAssetGraphScript(options.file);
+        const pagesAssetGraphChanged =
+          pagesAppChanged || STYLESHEET_FILE_RE.test(options.file) || pagesAssetGraphScriptChanged;
+        if (pagesAssetGraphChanged) {
+          for (const env of Object.values(options.server.environments)) {
+            const mod = env.moduleGraph.getModuleById(RESOLVED_PAGES_CLIENT_ASSETS);
+            if (mod) env.moduleGraph.invalidateModule(mod);
+          }
+        }
+        if (pagesAppChanged || (!hasAppDir && pagesAssetGraphScriptChanged)) {
+          options.server.ws.send({ type: "full-reload" });
+          return [];
+        }
+        if (hasAppDir) return;
         if (options.file.startsWith(pagesDir) && fileMatcher.extensionRegex.test(options.file)) {
           options.server.environments.client.hot.send({ type: "full-reload" });
           return [];
@@ -3575,6 +3758,15 @@ export const loadServerActionClient = ${
           pagesRunner?.clearCache();
         }
 
+        function invalidatePagesClientAssetsModule(reloadDocument = false) {
+          for (const env of Object.values(server.environments)) {
+            const mod = env.moduleGraph.getModuleById(RESOLVED_PAGES_CLIENT_ASSETS);
+            if (mod) env.moduleGraph.invalidateModule(mod);
+          }
+          pagesRunner?.clearCache();
+          if (reloadDocument) server.ws.send({ type: "full-reload" });
+        }
+
         function invalidateAppRoutingModules() {
           invalidateAppRouteCache();
           invalidateMetadataFileCache();
@@ -3631,6 +3823,31 @@ export const loadServerActionClient = ${
         let appRouteTypeGeneration: Promise<void> | null = null;
         let appRouteTypeGenerationPending = false;
 
+        function isPagesAppFile(filePath: string): boolean {
+          const relativePath = normalizePathSeparators(path.relative(pagesDir, filePath));
+          return (
+            !relativePath.includes("/") &&
+            relativePath.startsWith("_app.") &&
+            fileMatcher.extensionRegex.test(filePath)
+          );
+        }
+
+        function isPotentialPagesAssetGraphScript(filePath: string): boolean {
+          const cleanPath = stripViteModuleQuery(filePath);
+          if (!path.isAbsolute(cleanPath)) return false;
+          if (!isScriptModuleId(cleanPath) || cleanPath.endsWith(".d.ts")) return false;
+          const relativeRootPath = normalizePathSeparators(path.relative(root, cleanPath));
+          if (relativeRootPath.startsWith("..") || path.isAbsolute(relativeRootPath)) return false;
+          if (
+            relativeRootPath.includes("/node_modules/") ||
+            relativeRootPath.startsWith("node_modules/")
+          ) {
+            return false;
+          }
+          const relativeAppPath = normalizePathSeparators(path.relative(appDir, cleanPath));
+          return relativeAppPath.startsWith("..") || path.isAbsolute(relativeAppPath);
+        }
+
         function warnRouteTypeGenerationFailure(error: unknown) {
           server.config.logger.warn(
             `[vinext] Failed to regenerate route types: ${
@@ -3679,6 +3896,16 @@ export const loadServerActionClient = ${
 
         server.watcher.on("add", (filePath: string) => {
           let routeChanged = false;
+          const pagesAppChanged = isPagesAppFile(filePath);
+          const pagesAssetGraphScriptChanged = isPotentialPagesAssetGraphScript(filePath);
+          if (
+            hasPagesDir &&
+            (pagesAppChanged || STYLESHEET_FILE_RE.test(filePath) || pagesAssetGraphScriptChanged)
+          ) {
+            invalidatePagesClientAssetsModule(
+              pagesAppChanged || (!hasAppDir && pagesAssetGraphScriptChanged),
+            );
+          }
           if (hasPagesDir && filePath.startsWith(pagesDir) && pageExtensions.test(filePath)) {
             invalidateRouteCache(pagesDir);
             routeChanged = true;
@@ -3694,8 +3921,30 @@ export const loadServerActionClient = ${
             revalidateHybridRoutes();
           }
         });
+        server.watcher.on("change", (filePath: string) => {
+          const pagesAppChanged = isPagesAppFile(filePath);
+          const pagesAssetGraphScriptChanged = isPotentialPagesAssetGraphScript(filePath);
+          if (
+            hasPagesDir &&
+            (pagesAppChanged || STYLESHEET_FILE_RE.test(filePath) || pagesAssetGraphScriptChanged)
+          ) {
+            invalidatePagesClientAssetsModule(
+              pagesAppChanged || (!hasAppDir && pagesAssetGraphScriptChanged),
+            );
+          }
+        });
         server.watcher.on("unlink", (filePath: string) => {
           let routeChanged = false;
+          const pagesAppChanged = isPagesAppFile(filePath);
+          const pagesAssetGraphScriptChanged = isPotentialPagesAssetGraphScript(filePath);
+          if (
+            hasPagesDir &&
+            (pagesAppChanged || STYLESHEET_FILE_RE.test(filePath) || pagesAssetGraphScriptChanged)
+          ) {
+            invalidatePagesClientAssetsModule(
+              pagesAppChanged || (!hasAppDir && pagesAssetGraphScriptChanged),
+            );
+          }
           if (hasPagesDir && filePath.startsWith(pagesDir) && pageExtensions.test(filePath)) {
             invalidateRouteCache(pagesDir);
             routeChanged = true;

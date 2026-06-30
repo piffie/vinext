@@ -16,6 +16,7 @@ import {
 } from "../packages/vinext/src/server/client-reuse-manifest.js";
 import { VINEXT_CLIENT_REUSE_MANIFEST_HEADER } from "../packages/vinext/src/server/headers.js";
 import { applyAppMiddleware } from "../packages/vinext/src/server/app-middleware.js";
+import type { NextRequest } from "../packages/vinext/src/shims/server.js";
 import {
   handleMetadataRouteRequest,
   type MetadataRuntimeRoute,
@@ -141,6 +142,290 @@ function prerenderRouteParamsHeader(payload: unknown): string {
 }
 
 describe("createAppRscHandler", () => {
+  // Ported from Next.js: test/e2e/app-dir/app-basepath/index.test.ts
+  // https://github.com/vercel/next.js/blob/v16.2.6/test/e2e/app-dir/app-basepath/index.test.ts
+  it("applies basePath: false rewrites outside the App Router basePath", async () => {
+    const handler = createHandler({
+      configHeaders: [],
+      configRewrites: {
+        beforeFiles: [{ source: "/outside", destination: "/about", basePath: false }],
+        afterFiles: [],
+        fallback: [],
+      },
+    });
+
+    const response = await handler(new Request("https://example.test/outside"), null);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("page");
+  });
+
+  it("allows identity basePath: false rewrites to claim App routes", async () => {
+    const handler = createHandler({
+      configHeaders: [],
+      configRewrites: {
+        beforeFiles: [{ source: "/about", destination: "/about", basePath: false }],
+        afterFiles: [],
+        fallback: [],
+      },
+    });
+
+    const response = await handler(new Request("https://example.test/about"), null);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("page");
+  });
+
+  it.each(["afterFiles", "fallback"] as const)(
+    "allows out-of-basePath %s rewrites to reach Pages routes",
+    async (phase) => {
+      const renderPagesFallback = vi.fn(async () => new Response("pages", { status: 200 }));
+      const handler = createHandler({
+        configHeaders: [],
+        configRewrites: {
+          beforeFiles: [],
+          afterFiles:
+            phase === "afterFiles"
+              ? [{ source: "/outside", destination: "/pages", basePath: false }]
+              : [],
+          fallback:
+            phase === "fallback"
+              ? [{ source: "/outside", destination: "/pages", basePath: false }]
+              : [],
+        },
+        matchRoute: () => null,
+        renderPagesFallback,
+      });
+
+      const response = await handler(new Request("https://example.test/outside"), null);
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("pages");
+      expect(renderPagesFallback).toHaveBeenCalledWith(
+        expect.objectContaining({ pathname: "/pages" }),
+      );
+    },
+  );
+
+  it.each(["afterFiles", "fallback"] as const)(
+    "allows out-of-basePath POST requests through %s rewrites to App route handlers",
+    async (phase) => {
+      const route = createPageRoute({
+        __loadPage: undefined,
+        __loadRouteHandler() {},
+        page: null,
+        pattern: "/api",
+        routeHandler: { GET: () => new Response("route") },
+        routeSegments: ["api"],
+      });
+      const dispatchMatchedRouteHandler = vi.fn(async () => new Response("route", { status: 200 }));
+      const handler = createHandler({
+        configHeaders: [],
+        configRewrites: {
+          beforeFiles: [],
+          afterFiles:
+            phase === "afterFiles"
+              ? [{ source: "/outside", destination: "/api", basePath: false }]
+              : [],
+          fallback:
+            phase === "fallback"
+              ? [{ source: "/outside", destination: "/api", basePath: false }]
+              : [],
+        },
+        dispatchMatchedRouteHandler,
+        matchRoute: (pathname) => (pathname === "/api" ? { params: {}, route } : null),
+      });
+
+      const response = await handler(
+        new Request("https://example.test/outside", { method: "POST" }),
+        null,
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("route");
+      expect(dispatchMatchedRouteHandler).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["afterFiles", "fallback"] as const)(
+    "allows out-of-basePath Server Actions through %s rewrites",
+    async (phase) => {
+      const handleServerActionRequest = vi.fn(async () => new Response("action"));
+      const handler = createHandler({
+        configHeaders: [],
+        configRewrites: {
+          beforeFiles: [],
+          afterFiles:
+            phase === "afterFiles"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+          fallback:
+            phase === "fallback"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+        },
+        handleServerActionRequest,
+      });
+
+      const response = await handler(
+        new Request("https://example.test/outside", {
+          method: "POST",
+          headers: { "next-action": "action-id", "content-type": "text/plain" },
+        }),
+        null,
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("action");
+      expect(handleServerActionRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ cleanPathname: "/about" }),
+      );
+    },
+  );
+
+  it.each(["afterFiles", "fallback"] as const)(
+    "allows out-of-basePath progressive Server Actions through %s rewrites",
+    async (phase) => {
+      const handleProgressiveActionRequest = vi.fn(async () => new Response("progressive-action"));
+      const handler = createHandler({
+        configHeaders: [],
+        configRewrites: {
+          beforeFiles: [],
+          afterFiles:
+            phase === "afterFiles"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+          fallback:
+            phase === "fallback"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+        },
+        handleProgressiveActionRequest,
+      });
+
+      const response = await handler(
+        new Request("https://example.test/outside", {
+          method: "POST",
+          headers: { "content-type": "multipart/form-data; boundary=vinext" },
+        }),
+        null,
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("progressive-action");
+      expect(handleProgressiveActionRequest).toHaveBeenCalledWith(
+        expect.objectContaining({ cleanPathname: "/about" }),
+      );
+    },
+  );
+
+  it.each(["afterFiles", "fallback"] as const)(
+    "validates out-of-basePath RSC requests claimed by %s rewrites",
+    async (phase) => {
+      const headers = createRscRequestHeaders({ mountedSlotsHeader: "slot:modal:/" });
+      const expectedHash = await computeRscCacheBustingSearchParam(headers);
+      const handler = createHandler({
+        configHeaders: [],
+        configRewrites: {
+          beforeFiles: [],
+          afterFiles:
+            phase === "afterFiles"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+          fallback:
+            phase === "fallback"
+              ? [{ source: "/outside", destination: "/about", basePath: false }]
+              : [],
+        },
+      });
+
+      const response = await handler(
+        new Request("https://example.test/outside.rsc?tab=latest", { headers }),
+        null,
+      );
+
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(`/outside.rsc?tab=latest&_rsc=${expectedHash}`);
+    },
+  );
+
+  it("does not expose App routes directly outside basePath", async () => {
+    const renderNotFound = vi.fn(async () => new Response("rendered not found", { status: 404 }));
+    const handler = createHandler({ configHeaders: [], renderNotFound });
+
+    const response = await handler(new Request("https://example.test/about"), null);
+
+    expect(response.status).toBe(404);
+    expect(renderNotFound).not.toHaveBeenCalled();
+  });
+
+  it("does not redirect invalid RSC requests that remain outside basePath", async () => {
+    const headers = createRscRequestHeaders({ mountedSlotsHeader: "slot:modal:/" });
+    const handler = createHandler({ configHeaders: [] });
+
+    const response = await handler(
+      new Request("https://example.test/about.rsc?tab=latest", { headers }),
+      null,
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
+  it("preserves middleware response headers on unclaimed out-of-basePath 404s", async () => {
+    const middleware = vi.fn(
+      () =>
+        new Response(null, {
+          headers: {
+            "x-middleware-next": "1",
+            "x-response-header": "preserved",
+          },
+        }),
+    );
+    const handler = createHandler({
+      configHeaders: [],
+      middlewareModule: { default: middleware },
+    });
+
+    const response = await handler(new Request("https://example.test/outside"), null);
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-response-header")).toBe("preserved");
+  });
+
+  it("does not dispatch server actions directly outside basePath", async () => {
+    const handleServerActionRequest = vi.fn(async () => new Response("action"));
+    const handler = createHandler({ configHeaders: [], handleServerActionRequest });
+
+    const response = await handler(
+      new Request("https://example.test/about", {
+        method: "POST",
+        headers: { "next-action": "action-id", "content-type": "text/plain" },
+      }),
+      null,
+    );
+
+    expect(response.status).toBe(404);
+    expect(handleServerActionRequest).not.toHaveBeenCalled();
+  });
+
+  it("passes out-of-basePath state to App middleware", async () => {
+    let capturedMiddlewareRequest: NextRequest | null = null;
+    const middleware = vi.fn((request: NextRequest) => {
+      capturedMiddlewareRequest = request;
+      return new Response(null, { headers: { "x-middleware-next": "1" } });
+    });
+    const handler = createHandler({ configHeaders: [], middlewareModule: { default: middleware } });
+
+    await handler(new Request("https://example.test/outside"), null);
+
+    expect(middleware).toHaveBeenCalledOnce();
+    const middlewareRequest = capturedMiddlewareRequest as NextRequest | null;
+    expect(middlewareRequest).not.toBeNull();
+    expect(middlewareRequest!.nextUrl.basePath).toBe("");
+    expect(middlewareRequest!.nextUrl.pathname).toBe("/outside");
+  });
+
   it.each([
     "url=%2Fimg.jpg&w=640junk&q=75",
     "url=%2Fimg.jpg&w=640&q=75&extra=1",
@@ -2237,6 +2522,43 @@ describe("createAppRscHandler", () => {
     expect(response.headers.get("vary")).toBeNull();
     expect(clearRequestContext).toHaveBeenCalledTimes(1);
     expect(matchRoute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "public files",
+      path: "/logo.svg",
+      overrides: { publicFiles: new Set(["/logo.svg"]) },
+    },
+    {
+      name: "image optimization",
+      path: "/_next/image?url=%2Fimg.jpg&w=640&q=75",
+      overrides: {},
+    },
+    {
+      name: "metadata routes",
+      path: "/favicon.ico",
+      overrides: {
+        metadataRoutes: [
+          {
+            type: "favicon" as const,
+            isDynamic: false,
+            filePath: "/tmp/app/favicon.ico",
+            routePrefix: "",
+            routeSegments: [],
+            servedUrl: "/favicon.ico",
+            contentType: "image/x-icon",
+            fileDataBase64: btoa("icon-bytes"),
+          },
+        ],
+      },
+    },
+  ])("does not expose $name directly outside basePath", async ({ path, overrides }) => {
+    const handler = createHandler({ configHeaders: [], matchRoute: () => null, ...overrides });
+
+    const response = await handler(new Request(`https://example.test${path}`), null);
+
+    expect(response.status).toBe(404);
   });
 
   it("lets middleware Cache-Control override static metadata route defaults", async () => {

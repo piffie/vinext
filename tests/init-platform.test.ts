@@ -225,28 +225,28 @@ describe("prerender init choice", () => {
 
 describe("warm CDN cache init choice", () => {
   it("parses explicit warm CDN cache flags", () => {
-    expect(parseWarmCdnCacheArg(["--warm-cdn-cache"])).toBe(true);
-    expect(parseWarmCdnCacheArg(["--no-warm-cdn-cache"])).toBe(false);
-    expect(parseWarmCdnCacheArg(["--warm-cdn-cache=true"])).toBe(true);
-    expect(parseWarmCdnCacheArg(["--warm-cdn-cache=false"])).toBe(false);
+    expect(parseWarmCdnCacheArg(["--experimental-warm-cdn-cache"])).toBe(true);
+    expect(parseWarmCdnCacheArg(["--no-experimental-warm-cdn-cache"])).toBe(false);
+    expect(parseWarmCdnCacheArg(["--experimental-warm-cdn-cache=true"])).toBe(true);
+    expect(parseWarmCdnCacheArg(["--experimental-warm-cdn-cache=false"])).toBe(false);
   });
 
   it("rejects unsupported explicit values", () => {
-    expect(() => parseWarmCdnCacheArg(["--warm-cdn-cache=maybe"])).toThrow(
-      "--warm-cdn-cache expects true or false",
+    expect(() => parseWarmCdnCacheArg(["--experimental-warm-cdn-cache=maybe"])).toThrow(
+      "--experimental-warm-cdn-cache expects true or false",
     );
   });
 
-  it("defaults non-interactive and agent environments to enabled", async () => {
+  it("defaults non-interactive and agent environments to disabled", async () => {
     await expect(resolveInitWarmCdnCache([], { env: {}, isInteractive: false })).resolves.toBe(
-      true,
+      false,
     );
     await expect(
       resolveInitWarmCdnCache([], { env: { CODEX_THREAD_ID: "test" }, isInteractive: true }),
-    ).resolves.toBe(true);
+    ).resolves.toBe(false);
   });
 
-  it("defaults the interactive prompt to Yes", async () => {
+  it("defaults the interactive prompt to No", async () => {
     const prompts: string[] = [];
     const output = new PassThrough();
     await expect(
@@ -259,8 +259,10 @@ describe("warm CDN cache init choice", () => {
           return "";
         },
       }),
-    ).resolves.toBe(true);
-    expect(prompts).toEqual(["  Pre-warm Workers Cache during deploy? [Y/n]: "]);
+    ).resolves.toBe(false);
+    expect(prompts).toEqual([
+      "  Enable Workers Cache experimental pre-warm during deploy? [y/N]: ",
+    ]);
     expect(output.read()?.toString()).toBe("\n");
   });
 });
@@ -324,7 +326,7 @@ describe("resolveInitPlatform", () => {
 });
 
 describe("resolveInitOptions", () => {
-  it("defaults Cloudflare Workers Cache init to CDN pre-warming", async () => {
+  it("defaults Cloudflare Workers Cache init away from CDN pre-warming", async () => {
     await expect(resolveInitOptions([], { env: {}, isInteractive: false })).resolves.toEqual({
       platform: "cloudflare",
       prerender: false,
@@ -332,7 +334,7 @@ describe("resolveInitOptions", () => {
         dataCache: "kv",
         cdnCache: "workers-cache",
         imageOptimization: "cloudflare-images",
-        warmCdnCache: true,
+        warmCdnCache: false,
       },
     });
   });
@@ -381,7 +383,7 @@ describe("resolveInitOptions", () => {
         dataCache: "kv",
         cdnCache: "workers-cache",
         imageOptimization: "cloudflare-images",
-        warmCdnCache: true,
+        warmCdnCache: false,
       },
     });
 
@@ -390,7 +392,7 @@ describe("resolveInitOptions", () => {
       "  Choose a data cache:\n    1. Cloudflare KV (default)\n    2. None\n  Data cache [1]: ",
       "  Choose image optimization:\n    1. Cloudflare Images (default)\n    2. None\n  Image optimization [1]: ",
       "  Pre-render all static routes after build? [y/N]: ",
-      "  Pre-warm Workers Cache during deploy? [Y/n]: ",
+      "  Enable Workers Cache experimental pre-warm during deploy? [y/N]: ",
     ]);
   });
 
@@ -434,10 +436,10 @@ describe("resolveInitOptions", () => {
           "--cdn-cache=data-cache",
           "--data-cache=kv",
           "--image-optimization=none",
-          "--warm-cdn-cache",
+          "--experimental-warm-cdn-cache",
         ],
         { env: {}, isInteractive: false },
       ),
-    ).rejects.toThrow("--warm-cdn-cache requires --cdn-cache=workers-cache");
+    ).rejects.toThrow("--experimental-warm-cdn-cache requires --cdn-cache=workers-cache");
   });
 });

@@ -193,7 +193,7 @@ export function addScripts(
 
     if (platform === "cloudflare" && !pkg.scripts["deploy:vinext"]) {
       pkg.scripts["deploy:vinext"] = options.warmCdnCache
-        ? "vinext-cloudflare deploy --config dist/server/wrangler.json --warm-cdn-cache"
+        ? "vinext-cloudflare deploy --config dist/server/wrangler.json --experimental-warm-cdn-cache"
         : "vinext-cloudflare deploy --config dist/server/wrangler.json";
       added.push("deploy:vinext");
     }
@@ -565,8 +565,7 @@ export async function init(options: InitOptions): Promise<InitResult> {
   // ── Step 3: Add scripts ────────────────────────────────────────────────
 
   const addedScripts = addScripts(root, port, platform, {
-    warmCdnCache:
-      options.cloudflare?.warmCdnCache ?? options.cloudflare?.cdnCache === "workers-cache",
+    warmCdnCache: options.cloudflare?.warmCdnCache ?? false,
   });
 
   // ── Step 4: Generate vite.config.ts ────────────────────────────────────

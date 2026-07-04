@@ -130,9 +130,9 @@ export function parsePrerenderArg(args: string[]): boolean | undefined {
 export function parseWarmCdnCacheArg(args: string[]): boolean | undefined {
   return parseBooleanArg(
     args,
-    "--warm-cdn-cache",
-    "--no-warm-cdn-cache",
-    '--warm-cdn-cache expects true or false when using the "--warm-cdn-cache=value" form.',
+    "--experimental-warm-cdn-cache",
+    "--no-experimental-warm-cdn-cache",
+    '--experimental-warm-cdn-cache expects true or false when using the "--experimental-warm-cdn-cache=value" form.',
   );
 }
 
@@ -216,7 +216,7 @@ export async function resolveInitOptions(
   const explicitWarmCdnCache = parseWarmCdnCacheArg(args);
   if (platform === "cloudflare" && platformOptions?.cdnCache !== "workers-cache") {
     if (explicitWarmCdnCache === true) {
-      throw new Error("--warm-cdn-cache requires --cdn-cache=workers-cache.");
+      throw new Error("--experimental-warm-cdn-cache requires --cdn-cache=workers-cache.");
     }
   }
 
@@ -289,19 +289,21 @@ export async function resolveInitWarmCdnCache(
   const output = options.output ?? process.stdout;
   const isInteractive =
     options.isInteractive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  if (isAgentEnvironment(env) || !isInteractive) return true;
+  if (isAgentEnvironment(env) || !isInteractive) return false;
 
   const readline = options.question ? undefined : createInterface({ input, output });
   const question = options.question ?? ((prompt: string) => readline!.question(prompt));
 
   try {
     while (true) {
-      const answer = (await question("  Pre-warm Workers Cache during deploy? [Y/n]: "))
+      const answer = (
+        await question("  Enable Workers Cache experimental pre-warm during deploy? [y/N]: ")
+      )
         .trim()
         .toLowerCase();
       if (answer === "") {
         output.write("\n");
-        return true;
+        return false;
       }
       if (answer === "y" || answer === "yes") {
         output.write("\n");

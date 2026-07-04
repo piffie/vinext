@@ -9,6 +9,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { spawn, type SpawnOptions } from "node:child_process";
@@ -19,6 +20,7 @@ import { loadDotenv } from "vinext/internal/config/dotenv";
 import { loadNextConfig, resolveNextConfig } from "vinext/internal/config/next-config";
 import {
   formatVinextPrerenderLabel,
+  loadVinextCacheConfigFromViteConfig,
   loadVinextPrerenderConfigFromViteConfig,
   resolveVinextPrerenderDecision,
 } from "vinext/internal/config/prerender";
@@ -33,11 +35,13 @@ import { runTPR } from "./tpr.js";
 import {
   formatMissingCacheAdapterError,
   formatImageOptimizationHint,
+  resolveKvDataAdapterConfig,
   viteConfigHasCacheAdapter,
   viteConfigHasCloudflarePlugin,
   viteConfigHasImageAdapter,
   workerEntryHasCacheHandler,
 } from "./deploy-config.js";
+import { buildPrerenderKVPairs, type KVBulkPair } from "./prerender-kv-populate.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -79,6 +83,11 @@ function parsePositiveIntegerArg(raw: string, flag: string): number {
     throw new Error(`${flag} expects a positive integer, but got "${raw}".`);
   }
   return parsed;
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error);
 }
 
 // ─── CLI arg parsing (uses Node.js util.parseArgs) ──────────────────────────
@@ -200,12 +209,56 @@ async function runBuild(info: ProjectInfo, env: string | undefined): Promise<voi
   });
 }
 
+async function populateKVCacheFromPrerenderedArtifacts(
+  root: string,
+  buildEnv: string | undefined,
+  wranglerEnv: string | undefined,
+): Promise<void> {
+  if (!viteConfigHasCacheAdapter(root)) return;
+
+  const vite = await loadProjectViteApi(root);
+  const cacheConfig = await withCloudflareEnv(buildEnv, () =>
+    loadVinextCacheConfigFromViteConfig(vite, root),
+  );
+  const kvConfig = resolveKvDataAdapterConfig(cacheConfig);
+  if (!kvConfig) return;
+
+  const { routeCount, pairs } = buildPrerenderKVPairs(path.join(root, "dist", "server"), {
+    appPrefix: kvConfig.appPrefix,
+    ttlSeconds: kvConfig.ttlSeconds,
+  });
+
+  if (pairs.length === 0) {
+    console.log(
+      "  KV cache: Skipping prerender upload (no App Router prerendered cache entries found).",
+    );
+    return;
+  }
+
+  await runWranglerKVBulkPut(root, {
+    binding: kvConfig.binding,
+    env: wranglerEnv,
+    pairs,
+  });
+
+  console.log(
+    `  KV cache: Uploaded ${pairs.length} entr${pairs.length === 1 ? "y" : "ies"} for ${routeCount} prerendered route${routeCount === 1 ? "" : "s"}.`,
+  );
+}
+
 // ─── Deploy ──────────────────────────────────────────────────────────────────
 
 type WranglerDeployArgs = {
   args: string[];
   env: string | undefined;
 };
+
+type WranglerKVBulkPutArgs = {
+  args: string[];
+  env: string | undefined;
+};
+
+const KV_BULK_PUT_CHUNK_SIZE = 25;
 
 export function validateWranglerEnvName(env: string): string {
   if (env.includes("\0")) {
@@ -219,6 +272,19 @@ export function buildWranglerDeployArgs(
 ): WranglerDeployArgs {
   const args = ["deploy"];
   const env = options.env || (options.preview ? "preview" : undefined);
+  if (env) {
+    args.push("--env", validateWranglerEnvName(env));
+  }
+  return { args, env };
+}
+
+export function buildWranglerKVBulkPutArgs(options: {
+  binding: string;
+  env?: string;
+  filePath: string;
+}): WranglerKVBulkPutArgs {
+  const env = options.env || undefined;
+  const args = ["kv", "bulk", "put", options.filePath, "--binding", options.binding, "--remote"];
   if (env) {
     args.push("--env", validateWranglerEnvName(env));
   }
@@ -269,6 +335,58 @@ export function buildWranglerInvocation(
   const wranglerBin = resolveWranglerBin(root);
   const { args, env } = buildWranglerDeployArgs(options);
   return { ...buildNodeCliInvocation(wranglerBin, args, nodeExecutable), env };
+}
+
+export async function runWranglerKVBulkPut(
+  root: string,
+  options: {
+    binding: string;
+    env?: string;
+    pairs: KVBulkPair[];
+    tempDir?: string;
+  },
+  execute: typeof spawn = spawn,
+  nodeExecutable: string = process.execPath,
+): Promise<void> {
+  const tempDir = fs.mkdtempSync(path.join(options.tempDir ?? os.tmpdir(), "vinext-kv-bulk-"));
+
+  try {
+    const wranglerBin = resolveWranglerBin(root);
+    const totalChunks = Math.ceil(options.pairs.length / KV_BULK_PUT_CHUNK_SIZE);
+    for (let i = 0; i < totalChunks; i++) {
+      const filePath = path.join(tempDir, `prerender-kv-${i}.json`);
+      const chunk = options.pairs.slice(
+        i * KV_BULK_PUT_CHUNK_SIZE,
+        (i + 1) * KV_BULK_PUT_CHUNK_SIZE,
+      );
+      fs.writeFileSync(filePath, JSON.stringify(chunk), "utf-8");
+      const { args } = buildWranglerKVBulkPutArgs({
+        binding: options.binding,
+        env: options.env,
+        filePath,
+      });
+      const invocation = buildNodeCliInvocation(wranglerBin, args, nodeExecutable);
+      const child = execute(invocation.file, invocation.args, {
+        cwd: root,
+        stdio: "inherit",
+        shell: false,
+      });
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => {
+          if (code === 0) {
+            resolve();
+            return;
+          }
+
+          const exitReason = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
+          reject(new Error(`Wrangler KV bulk put failed with ${exitReason}.`));
+        });
+      });
+    }
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 export async function runWranglerDeploy(
@@ -414,6 +532,7 @@ export async function deploy(options: DeployOptions): Promise<void> {
   // Triggered by --prerender-all, vinext({ prerender: true }), or automatically
   // when next.config.js sets `output: 'export'` (every route must be statically
   // exportable). The CLI flag wins when more than one trigger is present.
+  let ranPrerender = false;
   {
     const rawNextConfig = await loadNextConfig(info.root);
     const nextConfig = await resolveNextConfig(rawNextConfig, info.root);
@@ -438,6 +557,21 @@ export async function deploy(options: DeployOptions): Promise<void> {
         Error.stackTraceLimit = Math.max(Error.stackTraceLimit, 50);
       }
       await runPrerender({ root: info.root, concurrency: options.prerenderConcurrency });
+      ranPrerender = true;
+    }
+  }
+
+  if (ranPrerender) {
+    try {
+      await populateKVCacheFromPrerenderedArtifacts(
+        root,
+        buildEnv,
+        deployEnv === "production" && !options.env ? undefined : deployEnv,
+      );
+    } catch (error) {
+      console.log(
+        `  KV cache: Skipping prerender upload (${formatUnknownError(error)}). Continuing with deploy.`,
+      );
     }
   }
 

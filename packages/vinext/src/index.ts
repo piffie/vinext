@@ -1428,10 +1428,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
   }
 
   async function writeRouteTypes(): Promise<void> {
-    if (!hasAppDir) return;
     await generateRouteTypes({
       root,
-      appDir,
+      appDir: hasAppDir ? appDir : null,
       pageExtensions: nextConfig.pageExtensions,
     });
   }
@@ -1889,7 +1888,9 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
           resolvedNodeEnv = "development";
         }
         if (process.env.NODE_ENV !== resolvedNodeEnv) {
-          process.env.NODE_ENV = resolvedNodeEnv;
+          // Next.js's vendored global declarations mark NODE_ENV readonly even
+          // though Node permits updating process.env at runtime.
+          Reflect.set(process.env, "NODE_ENV", resolvedNodeEnv);
         }
         if (env?.command === "build") {
           previewBuildCredentials = getPreviewBuildCredentials() ?? createPreviewBuildCredentials();

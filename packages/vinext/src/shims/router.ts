@@ -1459,6 +1459,7 @@ function cancelPreviousRenderCommit(): void {
 }
 
 function scheduleHardNavigationAndThrow(url: string, message: string): never {
+  assertSafeNavigationUrl(url, HardNavigationScheduledError);
   if (typeof window === "undefined") {
     throw new HardNavigationScheduledError(message);
   }

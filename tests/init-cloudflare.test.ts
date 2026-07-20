@@ -41,6 +41,70 @@ export default defineConfig({
     expect(output).toContain('childEnvironments: ["ssr"]');
   });
 
+  it("adds viteEnvironment to an existing bare cloudflare() call", () => {
+    const input = `import { defineConfig } from "vite";
+import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+
+export default defineConfig({
+  plugins: [vinext(), cloudflare()],
+});
+`;
+
+    const output = updateViteConfigForCloudflare("vite.config.ts", input, {
+      isAppRouter: true,
+      nativeModulesToStub: [],
+    });
+
+    expectValidConfig(output);
+    expect(output).toContain('childEnvironments: ["ssr"]');
+    expect(output.match(/cloudflare\(/g)).toHaveLength(1);
+    expect(
+      updateViteConfigForCloudflare("vite.config.ts", output, {
+        isAppRouter: true,
+        nativeModulesToStub: [],
+      }),
+    ).toBe(output);
+  });
+
+  it("adds viteEnvironment to an existing configured cloudflare() call", () => {
+    const input = `import { defineConfig } from "vite";
+import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+
+export default defineConfig({
+  plugins: [vinext(), cloudflare({ configPath: "./wrangler.jsonc" })],
+});
+`;
+
+    const output = updateViteConfigForCloudflare("vite.config.ts", input, {
+      isAppRouter: true,
+      nativeModulesToStub: [],
+    });
+
+    expectValidConfig(output);
+    expect(output).toContain('configPath: "./wrangler.jsonc"');
+    expect(output).toContain('childEnvironments: ["ssr"]');
+  });
+
+  it("leaves an existing cloudflare() call alone for the Pages Router", () => {
+    const input = `import { defineConfig } from "vite";
+import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+
+export default defineConfig({
+  plugins: [vinext(), cloudflare()],
+});
+`;
+
+    const output = updateViteConfigForCloudflare("vite.config.ts", input, {
+      isAppRouter: false,
+      nativeModulesToStub: [],
+    });
+
+    expect(output).not.toContain("viteEnvironment");
+  });
+
   it("updates a CommonJS Pages Router config", () => {
     const input = `const { defineConfig } = require("vite");
 const vinext = require("vinext");
@@ -456,6 +520,34 @@ export default { plugins: [vinext({ imageOptimization: true })] };
     ).toBe(output);
   });
 
+  it("adds a Worker entry and assets to an existing Wrangler config", () => {
+    const options = {
+      dataCache: "none" as const,
+      cdnCache: "data-cache" as const,
+      imageOptimization: "none" as const,
+    };
+    const output = updateWranglerConfigForCloudflare(`{ "name": "existing" }\n`, options);
+    expect(JSON.parse(output)).toEqual({
+      name: "existing",
+      main: "vinext/server/fetch-handler",
+      assets: { directory: "dist/client", not_found_handling: "none", binding: "ASSETS" },
+    });
+    expect(updateWranglerConfigForCloudflare(output, options)).toBe(output);
+  });
+
+  it("preserves an existing Worker entry and assets", () => {
+    const input = `{
+  "main": "./worker/index.ts",
+  "assets": { "not_found_handling": "none", "binding": "ASSETS" }
+}\n`;
+    const output = updateWranglerConfigForCloudflare(input, {
+      dataCache: "none",
+      cdnCache: "data-cache",
+      imageOptimization: "none",
+    });
+    expect(output).toBe(input);
+  });
+
   it("keeps additive Wrangler JSON updates valid strict JSON", () => {
     const output = updateWranglerConfigForCloudflare(`{ "name": "existing" }\n`, {
       dataCache: "kv",
@@ -482,6 +574,8 @@ export default { plugins: [vinext({ imageOptimization: true })] };
     const output = updateWranglerConfigForCloudflare(input, options);
     expect(output).toContain("// keep this comment");
     expect(JSON.parse(output.replace("  // keep this comment\n", ""))).toEqual({
+      main: "vinext/server/fetch-handler",
+      assets: { directory: "dist/client", not_found_handling: "none", binding: "ASSETS" },
       images: { binding: "IMAGES" },
     });
     expect(updateWranglerConfigForCloudflare(output, options)).toBe(output);
@@ -493,7 +587,11 @@ export default { plugins: [vinext({ imageOptimization: true })] };
       cdnCache: "workers-cache",
       imageOptimization: "none",
     });
-    expect(JSON.parse(output)).toEqual({ cache: { enabled: true } });
+    expect(JSON.parse(output)).toEqual({
+      main: "vinext/server/fetch-handler",
+      assets: { directory: "dist/client", not_found_handling: "none", binding: "ASSETS" },
+      cache: { enabled: true },
+    });
   });
 
   it("preserves a custom Wrangler Images binding for the Vite adapter", () => {

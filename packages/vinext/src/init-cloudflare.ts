@@ -55,7 +55,7 @@ export function validateCloudflarePlatformSetup(
     .find((candidate) => fs.existsSync(candidate));
   const wranglerCode = wranglerPath ? fs.readFileSync(wranglerPath, "utf-8") : undefined;
   const updatedWranglerCode = wranglerCode
-    ? updateWranglerConfigForCloudflare(wranglerCode, cloudflare)
+    ? updateWranglerConfigForCloudflare(wranglerCode, cloudflare, { root: context.root })
     : undefined;
   const imagesBinding = updatedWranglerCode
     ? getWranglerImagesBinding(updatedWranglerCode)
@@ -125,7 +125,9 @@ export function setupCloudflarePlatform(
     );
     generatedPlatformFiles.push("wrangler.jsonc");
   } else if (wranglerCode) {
-    const updatedConfig = updateWranglerConfigForCloudflare(wranglerCode, cloudflare);
+    const updatedConfig = updateWranglerConfigForCloudflare(wranglerCode, cloudflare, {
+      root: context.root,
+    });
     if (updatedConfig !== wranglerCode) {
       fs.writeFileSync(wranglerPath, updatedConfig, "utf-8");
       generatedPlatformFiles.push(path.basename(wranglerPath));
@@ -163,18 +165,25 @@ export function setupCloudflarePlatform(
   };
 }
 
+/**
+ * `main` is what makes a Wrangler config a Worker rather than a static-assets
+ * project. A custom `worker/index.*` wins when present; otherwise the
+ * router-selected entry resolves to the App or Pages Router handler at build
+ * time.
+ */
+function resolveWorkerEntry(root: string): string {
+  if (fs.existsSync(path.join(root, "worker", "index.ts"))) return "./worker/index.ts";
+  if (fs.existsSync(path.join(root, "worker", "index.js"))) return "./worker/index.js";
+  return "vinext/server/fetch-handler";
+}
+
 // Cloudflare deployment scaffolding belongs to `vinext init`.
 export function generateWranglerConfig(
   info: CloudflareProjectInfo,
   options: CloudflareInitOptions = DEFAULT_CLOUDFLARE_INIT_OPTIONS,
   today = new Date().toISOString().split("T")[0],
 ): string {
-  const customWorkerEntry = fs.existsSync(path.join(info.root, "worker", "index.ts"))
-    ? "./worker/index.ts"
-    : fs.existsSync(path.join(info.root, "worker", "index.js"))
-      ? "./worker/index.js"
-      : undefined;
-  const workerEntry = customWorkerEntry ?? "vinext/server/fetch-handler";
+  const workerEntry = resolveWorkerEntry(info.root);
 
   const config: Record<string, unknown> = {
     $schema: "node_modules/wrangler/config-schema.json",
@@ -365,6 +374,7 @@ function appendTopLevelJsonProperty(code: string, property: string): string {
 export function updateWranglerConfigForCloudflare(
   code: string,
   options: CloudflareInitOptions,
+  context: { root?: string } = {},
 ): string {
   try {
     JSON.parse(stripJsonComments(code));
@@ -372,6 +382,20 @@ export function updateWranglerConfigForCloudflare(
     throw new Error("Could not parse the existing Wrangler JSON/JSONC config.", { cause });
   }
   let output = code;
+  // Without `main` and `assets` the Cloudflare plugin builds the project as
+  // assets-only: the build emits no `dist/server/wrangler.json`, and the deploy
+  // reports success while every route 404s. Keep these in sync with
+  // `generateWranglerConfig`, which writes them on the from-scratch path.
+  if (!findTopLevelJsonProperty(output, "main")) {
+    const workerEntry = resolveWorkerEntry(context.root ?? process.cwd());
+    output = appendTopLevelJsonProperty(output, `  "main": ${JSON.stringify(workerEntry)}`);
+  }
+  if (!findTopLevelJsonProperty(output, "assets")) {
+    output = appendTopLevelJsonProperty(
+      output,
+      '  "assets": { "directory": "dist/client", "not_found_handling": "none", "binding": "ASSETS" }',
+    );
+  }
   if (options.cdnCache === "workers-cache") {
     const cacheProperty = findTopLevelJsonProperty(output, "cache");
     if (!cacheProperty) {
@@ -975,6 +999,39 @@ function cloudflarePluginExpression(isAppRouter: boolean, binding: string): stri
     : `${binding}()`;
 }
 
+/**
+ * An existing bare `cloudflare()` call is left as-is by `ensurePlugins`, which
+ * only adds plugins that are absent. For the App Router that silently drops
+ * `viteEnvironment`, so the RSC environment never runs in workerd.
+ */
+function ensureCloudflareViteEnvironment(
+  output: MagicString,
+  config: AstObject,
+  binding: string,
+  isAppRouter: boolean,
+  code: string,
+): void {
+  if (!isAppRouter) return;
+  const call = findPluginCall(config, binding);
+  if (!call) return;
+  const viteEnvironment = `viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] }`;
+  const firstArgument = call.arguments[0];
+  if (!firstArgument) {
+    output.appendLeft(call.end - 1, `{ ${viteEnvironment} }`);
+    return;
+  }
+  if (firstArgument.type !== "ObjectExpression") return;
+  const argumentObject = firstArgument as AstObject;
+  if (findProperty(argumentObject, "viteEnvironment")) return;
+  const callIndent =
+    code
+      .slice(0, (call as AstNode).start)
+      .split("\n")
+      .at(-1)
+      ?.match(/^\s*/)?.[0] ?? "";
+  insertObjectProperty(output, argumentObject, `${callIndent}  ${viteEnvironment},`, code);
+}
+
 function findPluginCall(
   config: AstObject,
   binding: string,
@@ -1460,6 +1517,7 @@ export function updateViteConfigForCloudflare(
     ],
     code,
   );
+  ensureCloudflareViteEnvironment(output, config, cloudflareBinding, options.isAppRouter, code);
   if (existingVinextCall) {
     if (
       existingVinextCall.arguments.length === 0 &&

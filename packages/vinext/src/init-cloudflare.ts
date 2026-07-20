@@ -376,10 +376,16 @@ export function updateWranglerConfigForCloudflare(
   options: CloudflareInitOptions,
   context: { root?: string } = {},
 ): string {
+  let config: Record<string, unknown>;
   try {
-    JSON.parse(stripJsonComments(code));
+    config = JSON.parse(stripJsonComments(code)) as Record<string, unknown>;
   } catch (cause) {
     throw new Error("Could not parse the existing Wrangler JSON/JSONC config.", { cause });
+  }
+  if (Object.hasOwn(config, "pages_build_output_dir")) {
+    throw new Error(
+      'The existing Wrangler config uses "pages_build_output_dir", which cannot be combined with the Worker "main" required by vinext. Remove "pages_build_output_dir" and rerun vinext init.',
+    );
   }
   let output = code;
   // Without `main` and `assets` the Cloudflare plugin builds the project as
@@ -1020,9 +1026,61 @@ function ensureCloudflareViteEnvironment(
     output.appendLeft(call.end - 1, `{ ${viteEnvironment} }`);
     return;
   }
-  if (firstArgument.type !== "ObjectExpression") return;
+  if (firstArgument.type === "SpreadElement" || firstArgument.type !== "ObjectExpression") {
+    throw new Error(
+      "The cloudflare() plugin options must be a static object for vinext init to configure the App Router Vite environment.",
+    );
+  }
   const argumentObject = firstArgument as AstObject;
-  if (findProperty(argumentObject, "viteEnvironment")) return;
+  const viteEnvironmentProperties = argumentObject.properties.filter(
+    (property): property is AstProperty =>
+      property.type === "Property" && propertyName(property) === "viteEnvironment",
+  );
+  const existingViteEnvironment = viteEnvironmentProperties.at(-1);
+  if (existingViteEnvironment) {
+    const propertyIndex = argumentObject.properties.lastIndexOf(existingViteEnvironment);
+    if (
+      argumentObject.properties
+        .slice(propertyIndex + 1)
+        .some((property) => property.type === "SpreadElement")
+    ) {
+      throw new Error(
+        "The cloudflare() viteEnvironment option must appear after any spread properties so vinext init can verify it.",
+      );
+    }
+    if (existingViteEnvironment.value.type !== "ObjectExpression") {
+      throw new Error(
+        'The cloudflare() viteEnvironment option must be a static object with name: "rsc" and childEnvironments containing "ssr".',
+      );
+    }
+    const environmentObject = existingViteEnvironment.value as AstObject;
+    const nameProperties = environmentObject.properties.filter(
+      (property): property is AstProperty =>
+        property.type === "Property" && propertyName(property) === "name",
+    );
+    const childEnvironmentProperties = environmentObject.properties.filter(
+      (property): property is AstProperty =>
+        property.type === "Property" && propertyName(property) === "childEnvironments",
+    );
+    const name = nameProperties[0];
+    const childEnvironments = childEnvironmentProperties[0];
+    const hasAmbiguousProperties =
+      environmentObject.properties.some((property) => property.type === "SpreadElement") ||
+      nameProperties.length !== 1 ||
+      childEnvironmentProperties.length !== 1;
+    const hasRequiredName = name?.value.type === "Literal" && name.value.value === "rsc";
+    const hasRequiredChild =
+      childEnvironments?.value.type === "ArrayExpression" &&
+      childEnvironments.value.elements.some(
+        (element) => element?.type === "Literal" && element.value === "ssr",
+      );
+    if (hasAmbiguousProperties || !hasRequiredName || !hasRequiredChild) {
+      throw new Error(
+        'The cloudflare() viteEnvironment option must statically set name: "rsc" and include "ssr" in childEnvironments.',
+      );
+    }
+    return;
+  }
   const callIndent =
     code
       .slice(0, (call as AstNode).start)

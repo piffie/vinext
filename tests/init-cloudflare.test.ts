@@ -87,6 +87,61 @@ export default defineConfig({
     expect(output).toContain('childEnvironments: ["ssr"]');
   });
 
+  it("rejects dynamic cloudflare() options instead of leaving App Router misconfigured", () => {
+    const input = `import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+const cloudflareOptions = {};
+export default { plugins: [vinext(), cloudflare(cloudflareOptions)] };
+`;
+
+    expect(() =>
+      updateViteConfigForCloudflare("vite.config.ts", input, {
+        isAppRouter: true,
+        nativeModulesToStub: [],
+        cache: {
+          dataCache: "none",
+          cdnCache: "data-cache",
+          imageOptimization: "none",
+        },
+      }),
+    ).toThrow("cloudflare() plugin options must be a static object");
+  });
+
+  it("rejects an incomplete existing viteEnvironment", () => {
+    const input = `import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+export default { plugins: [vinext(), cloudflare({ viteEnvironment: {} })] };
+`;
+
+    expect(() =>
+      updateViteConfigForCloudflare("vite.config.ts", input, {
+        isAppRouter: true,
+        nativeModulesToStub: [],
+      }),
+    ).toThrow('viteEnvironment option must statically set name: "rsc"');
+  });
+
+  it("preserves a complete existing viteEnvironment", () => {
+    const input = `import vinext from "vinext";
+import { cloudflare } from "@cloudflare/vite-plugin";
+export default { plugins: [vinext(), cloudflare({
+  viteEnvironment: { name: "rsc", childEnvironments: ["ssr", "other"] },
+})] };
+`;
+
+    expect(
+      updateViteConfigForCloudflare("vite.config.ts", input, {
+        isAppRouter: true,
+        nativeModulesToStub: [],
+        cache: {
+          dataCache: "none",
+          cdnCache: "data-cache",
+          imageOptimization: "none",
+        },
+      }),
+    ).toBe(input);
+  });
+
   it("leaves an existing cloudflare() call alone for the Pages Router", () => {
     const input = `import { defineConfig } from "vite";
 import vinext from "vinext";
@@ -546,6 +601,18 @@ export default { plugins: [vinext({ imageOptimization: true })] };
       imageOptimization: "none",
     });
     expect(output).toBe(input);
+  });
+
+  it("rejects an existing Cloudflare Pages config instead of adding an incompatible main", () => {
+    const input = `{ "pages_build_output_dir": "./dist/client" }\n`;
+
+    expect(() =>
+      updateWranglerConfigForCloudflare(input, {
+        dataCache: "none",
+        cdnCache: "data-cache",
+        imageOptimization: "none",
+      }),
+    ).toThrow('"pages_build_output_dir", which cannot be combined with the Worker "main"');
   });
 
   it("keeps additive Wrangler JSON updates valid strict JSON", () => {
